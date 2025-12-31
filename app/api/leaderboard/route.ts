@@ -3,13 +3,11 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-// Test için listeyi biraz daha genişletebilirsin artık, koruma ekledik.
-const SYMBOLS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL", "INTC", "NFLX"];
+const SYMBOLS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL"];
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
-// --- TİP TANIMLARI ---
 type LeaderItem = {
   symbol: string;
   headline: string;
@@ -22,18 +20,13 @@ type LeaderItem = {
   ret5d: number | null;
 
   pricedIn: boolean | null;
-  expectedImpact: number;
-  realizedImpact: number;
-  score: number;
+  expectedImpact: number; // 50..100
+  realizedImpact: number; // 50..100
+  score: number;          // expectedImpact alias
 
-  confidence: number;
-  tooEarly: boolean;
+  confidence: number;     // 0..100
+  tooEarly: boolean;      // label
 };
-
-// --- YARDIMCI FONKSİYONLAR ---
-
-// Rate Limit Koruması: Rastgele bekleme süresi
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function toUnixSec(d: Date) {
   return Math.floor(d.getTime() / 1000);
@@ -45,18 +38,24 @@ function dayStartUtcSec(unixSec: number) {
   return Math.floor(day / 1000);
 }
 
+function safeRet(a: number, b: number) {
+  if (!isFinite(a) || a === 0) return null;
+  return (b - a) / a;
+}
+
 function scoreFromReturns(ret5d: number | null, ret1d: number | null, retPre5: number | null) {
   if (ret1d === null && ret5d === null) {
     return {
       expectedImpact: 50,
       realizedImpact: 50,
-      pricedIn: null,
+      pricedIn: null as boolean | null,
       confidence: 5,
       tooEarly: true,
     };
   }
 
   const rUsed = ret5d ?? ret1d ?? 0;
+
   const realizedBase = clamp(Math.round(Math.abs(rUsed) * 1000), 0, 50);
   const realizedImpact = clamp(50 + realizedBase, 50, 100);
 
@@ -80,161 +79,153 @@ function scoreFromReturns(ret5d: number | null, ret1d: number | null, retPre5: n
   if (pricedIn === true) conf -= 10;
   conf = clamp(conf, 0, 100);
 
-  return {
-    expectedImpact,
-    realizedImpact,
-    pricedIn,
-    confidence: conf,
-    tooEarly: false,
-  };
+  return { expectedImpact, realizedImpact, pricedIn, confidence: conf, tooEarly: false };
 }
 
-// --- VERİ ÇEKME ---
-
 async function fetchCandles(symbol: string, fromUnix: number, toUnix: number) {
-  try {
-    const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(
-      symbol
-    )}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
+  const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(
+    symbol
+  )}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
 
-    const res = await fetch(url, { next: { revalidate: 3600 } }); // Candle verisi sık değişmez, 1 saat cache
-    if (!res.ok) return null;
+  const res = await fetch(url, { next: { revalidate: 60 } });
+  if (!res.ok) return { ok: false, status: res.status, t: [], c: [] as number[] };
 
-    const data = await res.json();
-    if (data?.s !== "ok" || !Array.isArray(data?.t) || !Array.isArray(data?.c)) return null;
-
-    return {
-      t: data.t as number[],
-      c: data.c as number[],
-    };
-  } catch {
-    return null;
+  const data = await res.json();
+  if (data?.s !== "ok" || !Array.isArray(data?.t) || !Array.isArray(data?.c)) {
+    return { ok: false, status: 200, t: [], c: [] as number[] };
   }
+
+  return { ok: true, status: 200, t: data.t as number[], c: data.c as number[] };
 }
 
 function findCandleIndexForNews(candleT: number[], newsUnixSec: number) {
   const daySec = dayStartUtcSec(newsUnixSec);
-  // Binary Search
-  let lo = 0;
-  let hi = candleT.length - 1;
-  let ans = -1;
+  let lo = 0, hi = candleT.length - 1, ans = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (candleT[mid] >= daySec) {
-      ans = mid;
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
+    if (candleT[mid] >= daySec) { ans = mid; hi = mid - 1; }
+    else lo = mid + 1;
   }
   return ans;
 }
 
-function safeRet(a: number, b: number) {
-  if (!isFinite(a) || a === 0) return null;
-  return (b - a) / a;
-}
+async function fetchSymbolItems(symbol: string): Promise<{ items: LeaderItem[]; debug: any }> {
+  const debug: any = { symbol };
 
-async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
-  if (!FINNHUB_API_KEY) return [];
-
-  // API Koruması: Her hisse isteği arasında ufak, rastgele bir gecikme yap
-  // Bu sayede hepsi aynı milisaniyede Finnhub'a çarpmaz.
-  await sleep(Math.floor(Math.random() * 500) + 100); 
+  if (!FINNHUB_API_KEY) {
+    debug.error = "FINNHUB_API_KEY missing";
+    return { items: [], debug };
+  }
 
   const now = new Date();
-  
-  // 10 gün öncesine kadar olan haberleri al (Böylece +5D verisi oluşmuş olur)
-  const toDate = new Date(now.getTime() - 10 * 24 * 3600 * 1000);
-  const fromDate = new Date(now.getTime() - 45 * 24 * 3600 * 1000);
+
+  // ✅ SON 14 GÜN HABER (NO ITEMS sorununun ana fix’i)
+  const fromDate = new Date(now.getTime() - 14 * 24 * 3600 * 1000);
+  const toDate = now;
 
   const fromStr = fromDate.toISOString().slice(0, 10);
   const toStr = toDate.toISOString().slice(0, 10);
 
+  // candles: daha geniş tut
   const toUnix = toUnixSec(now);
-  const fromUnix = toUnix - 120 * 24 * 3600;
+  const fromUnix = toUnix - 140 * 24 * 3600;
 
-  try {
-    // 1) News
-    const newsUrl = `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(
-      symbol
-    )}&from=${fromStr}&to=${toStr}&token=${FINNHUB_API_KEY}`;
+  // 1) news
+  const newsUrl = `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(
+    symbol
+  )}&from=${fromStr}&to=${toStr}&token=${FINNHUB_API_KEY}`;
 
-    const newsRes = await fetch(newsUrl, { next: { revalidate: 60 } });
-    if (!newsRes.ok) return [];
+  const newsRes = await fetch(newsUrl, { next: { revalidate: 60 } });
+  debug.newsStatus = newsRes.status;
 
-    const news = await newsRes.json();
-    if (!Array.isArray(news) || news.length === 0) return [];
-
-    // 2) Candles
-    const candles = await fetchCandles(symbol, fromUnix, toUnix);
-    if (!candles) return [];
-
-    const items: LeaderItem[] = [];
-    const seen = new Set<string>();
-
-    // Sadece en önemli/yeni 5 haberi işle (UI şişmesin)
-    for (const n of news.slice(0, 5)) {
-      const headline = String(n?.headline || "").trim();
-      const dt = Number(n?.datetime || 0);
-      if (!headline || !dt) continue;
-
-      const key = `${symbol}-${dt}-${headline}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const idx = findCandleIndexForNews(candles.t, dt);
-      if (idx < 0 || idx >= candles.c.length) continue;
-
-      const base = candles.c[idx];
-      const ret1d = idx + 1 < candles.c.length ? safeRet(base, candles.c[idx + 1]) : null;
-      const ret5d = idx + 5 < candles.c.length ? safeRet(base, candles.c[idx + 5]) : null;
-      const retPre5 = idx - 5 >= 0 ? safeRet(candles.c[idx - 5], base) : null;
-
-      const { expectedImpact, realizedImpact, pricedIn, confidence, tooEarly } =
-        scoreFromReturns(ret5d, ret1d, retPre5);
-
-      items.push({
-        symbol,
-        headline,
-        type: n?.category ? String(n.category) : null,
-        publishedAt: new Date(dt * 1000).toISOString(),
-        url: n?.url ? String(n.url) : null,
-        retPre5,
-        ret1d,
-        ret5d,
-        pricedIn,
-        expectedImpact,
-        realizedImpact,
-        score: expectedImpact, // UI'da ana sıralama puanı
-        confidence,
-        tooEarly,
-      });
-    }
-
-    return items;
-  } catch (e) {
-    console.error(`Error processing ${symbol}:`, e);
-    return [];
+  if (!newsRes.ok) {
+    const txt = await newsRes.text().catch(() => "");
+    debug.newsError = txt?.slice(0, 200) || "news fetch failed";
+    return { items: [], debug };
   }
-}
 
-// --- MAIN HANDLER ---
+  const news = await newsRes.json();
+  debug.newsCount = Array.isArray(news) ? news.length : 0;
+
+  if (!Array.isArray(news) || news.length === 0) {
+    debug.note = "No news in date range";
+    return { items: [], debug };
+  }
+
+  // 2) candles
+  const candles = await fetchCandles(symbol, fromUnix, toUnix);
+  debug.candleOk = candles.ok;
+  debug.candleStatus = candles.status;
+  debug.candleCount = candles.t.length;
+
+  if (!candles.ok || candles.t.length < 10) {
+    debug.note = "No candle data";
+    return { items: [], debug };
+  }
+
+  const items: LeaderItem[] = [];
+  const seen = new Set<string>();
+
+  // her sembol için 10 haber
+  for (const n of news.slice(0, 10)) {
+    const headline = String(n?.headline || "").trim();
+    const dt = Number(n?.datetime || 0);
+    if (!headline || !dt) continue;
+
+    const key = `${symbol}-${dt}-${headline}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const idx = findCandleIndexForNews(candles.t, dt);
+    if (idx < 0 || idx >= candles.c.length) continue;
+
+    const base = candles.c[idx];
+
+    const ret1d = idx + 1 < candles.c.length ? safeRet(base, candles.c[idx + 1]) : null;
+    const ret5d = idx + 5 < candles.c.length ? safeRet(base, candles.c[idx + 5]) : null;
+    const retPre5 = idx - 5 >= 0 ? safeRet(candles.c[idx - 5], base) : null;
+
+    const { expectedImpact, realizedImpact, pricedIn, confidence, tooEarly } =
+      scoreFromReturns(ret5d, ret1d, retPre5);
+
+    items.push({
+      symbol,
+      headline,
+      type: n?.category ? String(n.category) : null,
+      publishedAt: new Date(dt * 1000).toISOString(),
+      url: n?.url ? String(n.url) : null,
+
+      retPre5,
+      ret1d,
+      ret5d,
+
+      pricedIn,
+      expectedImpact,
+      realizedImpact,
+      score: expectedImpact,
+
+      confidence,
+      tooEarly,
+    });
+  }
+
+  debug.itemsBuilt = items.length;
+  return { items, debug };
+}
 
 export async function GET(req: Request) {
   try {
+    const { searchParams } = new URL(req.url);
+    const min = clamp(Number(searchParams.get("min") ?? 50) || 50, 0, 100);
+    const limit = clamp(Number(searchParams.get("limit") ?? 30) || 30, 1, 200);
+    const debugMode = (searchParams.get("debug") || "") === "1";
+
     if (!FINNHUB_API_KEY) {
       return NextResponse.json({ error: "FINNHUB_API_KEY missing" }, { status: 500 });
     }
 
-    const { searchParams } = new URL(req.url);
-    const min = clamp(Number(searchParams.get("min") ?? 50) || 50, 0, 100);
-    const limit = clamp(Number(searchParams.get("limit") ?? 30) || 30, 1, 200);
-
-    // Promise.all ile paralel istek atıyoruz, ama içerdeki sleep sayesinde
-    // Finnhub'a bombardıman yapmıyoruz.
-    const all = await Promise.all(SYMBOLS.map((s) => fetchSymbolItems(s)));
-    const flat = all.flat();
+    const results = await Promise.all(SYMBOLS.map((s) => fetchSymbolItems(s)));
+    const flat = results.flatMap((r) => r.items);
 
     const items = flat
       .filter((x) => x.score >= min)
@@ -245,15 +236,12 @@ export async function GET(req: Request) {
       {
         asOf: new Date().toISOString(),
         range: { min, max: 100 },
-        count: items.length,
         items,
+        ...(debugMode ? { debug: results.map((r) => r.debug) } : {}),
       },
       { status: 200 }
     );
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || "Unknown error" }, { status: 500 });
   }
 }

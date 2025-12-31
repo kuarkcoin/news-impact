@@ -22,22 +22,20 @@ type LeaderItem = {
   pricedIn: boolean | null;
   expectedImpact: number; // 50..100
   realizedImpact: number; // 50..100
-  score: number;          // expectedImpact alias
+  score: number;
 
-  confidence: number;     // 0..100
-  tooEarly: boolean;      // label
+  confidence: number; // 0..100
+  tooEarly: boolean;  // label
 };
 
 function toUnixSec(d: Date) {
   return Math.floor(d.getTime() / 1000);
 }
-
 function dayStartUtcSec(unixSec: number) {
   const d = new Date(unixSec * 1000);
   const day = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
   return Math.floor(day / 1000);
 }
-
 function safeRet(a: number, b: number) {
   if (!isFinite(a) || a === 0) return null;
   return (b - a) / a;
@@ -55,7 +53,6 @@ function scoreFromReturns(ret5d: number | null, ret1d: number | null, retPre5: n
   }
 
   const rUsed = ret5d ?? ret1d ?? 0;
-
   const realizedBase = clamp(Math.round(Math.abs(rUsed) * 1000), 0, 50);
   const realizedImpact = clamp(50 + realizedBase, 50, 100);
 
@@ -82,20 +79,27 @@ function scoreFromReturns(ret5d: number | null, ret1d: number | null, retPre5: n
   return { expectedImpact, realizedImpact, pricedIn, confidence: conf, tooEarly: false };
 }
 
+async function fetchJsonSafe(url: string) {
+  const res = await fetch(url, { cache: "no-store" });
+  const text = await res.text().catch(() => "");
+  let json: any = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  return { ok: res.ok, status: res.status, text: text.slice(0, 220), json };
+}
+
 async function fetchCandles(symbol: string, fromUnix: number, toUnix: number) {
   const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(
     symbol
   )}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
 
-  const res = await fetch(url, { next: { revalidate: 60 } });
-  if (!res.ok) return { ok: false, status: res.status, t: [], c: [] as number[] };
+  const { ok, status, json, text } = await fetchJsonSafe(url);
+  if (!ok) return { ok: false, status, reason: text, t: [] as number[], c: [] as number[] };
 
-  const data = await res.json();
-  if (data?.s !== "ok" || !Array.isArray(data?.t) || !Array.isArray(data?.c)) {
-    return { ok: false, status: 200, t: [], c: [] as number[] };
+  if (json?.s !== "ok" || !Array.isArray(json?.t) || !Array.isArray(json?.c)) {
+    return { ok: false, status: 200, reason: "candles malformed", t: [], c: [] as number[] };
   }
 
-  return { ok: true, status: 200, t: data.t as number[], c: data.c as number[] };
+  return { ok: true, status: 200, reason: null as any, t: json.t as number[], c: json.c as number[] };
 }
 
 function findCandleIndexForNews(candleT: number[], newsUnixSec: number) {
@@ -113,38 +117,36 @@ async function fetchSymbolItems(symbol: string): Promise<{ items: LeaderItem[]; 
   const debug: any = { symbol };
 
   if (!FINNHUB_API_KEY) {
-    debug.error = "FINNHUB_API_KEY missing";
+    debug.error = "FINNHUB_API_KEY missing (server env)";
     return { items: [], debug };
   }
 
   const now = new Date();
-
-  // ✅ SON 14 GÜN HABER (NO ITEMS sorununun ana fix’i)
   const fromDate = new Date(now.getTime() - 14 * 24 * 3600 * 1000);
   const toDate = now;
 
   const fromStr = fromDate.toISOString().slice(0, 10);
   const toStr = toDate.toISOString().slice(0, 10);
 
-  // candles: daha geniş tut
-  const toUnix = toUnixSec(now);
-  const fromUnix = toUnix - 140 * 24 * 3600;
+  // Finnhub free limit risk: tek endpoint test
+  const testUrl = `https://finnhub.io/api/v1/quote?symbol=AAPL&token=${FINNHUB_API_KEY}`;
+  const test = await fetchJsonSafe(testUrl);
+  debug.keyTest = { ok: test.ok, status: test.status, sample: test.ok ? test.json : test.text };
+  if (!test.ok) {
+    debug.note = "API key invalid/blocked OR rate-limited (see keyTest)";
+    return { items: [], debug };
+  }
 
-  // 1) news
   const newsUrl = `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(
     symbol
   )}&from=${fromStr}&to=${toStr}&token=${FINNHUB_API_KEY}`;
 
-  const newsRes = await fetch(newsUrl, { next: { revalidate: 60 } });
-  debug.newsStatus = newsRes.status;
+  const newsRes = await fetchJsonSafe(newsUrl);
+  debug.news = { ok: newsRes.ok, status: newsRes.status, sample: newsRes.ok ? undefined : newsRes.text };
 
-  if (!newsRes.ok) {
-    const txt = await newsRes.text().catch(() => "");
-    debug.newsError = txt?.slice(0, 200) || "news fetch failed";
-    return { items: [], debug };
-  }
+  if (!newsRes.ok) return { items: [], debug };
 
-  const news = await newsRes.json();
+  const news = newsRes.json;
   debug.newsCount = Array.isArray(news) ? news.length : 0;
 
   if (!Array.isArray(news) || news.length === 0) {
@@ -152,21 +154,17 @@ async function fetchSymbolItems(symbol: string): Promise<{ items: LeaderItem[]; 
     return { items: [], debug };
   }
 
-  // 2) candles
-  const candles = await fetchCandles(symbol, fromUnix, toUnix);
-  debug.candleOk = candles.ok;
-  debug.candleStatus = candles.status;
-  debug.candleCount = candles.t.length;
+  const toUnix = toUnixSec(now);
+  const fromUnix = toUnix - 140 * 24 * 3600;
 
-  if (!candles.ok || candles.t.length < 10) {
-    debug.note = "No candle data";
-    return { items: [], debug };
-  }
+  const candles = await fetchCandles(symbol, fromUnix, toUnix);
+  debug.candles = { ok: candles.ok, status: candles.status, count: candles.t.length, reason: candles.reason };
+
+  if (!candles.ok || candles.t.length < 10) return { items: [], debug };
 
   const items: LeaderItem[] = [];
   const seen = new Set<string>();
 
-  // her sembol için 10 haber
   for (const n of news.slice(0, 10)) {
     const headline = String(n?.headline || "").trim();
     const dt = Number(n?.datetime || 0);
@@ -218,11 +216,6 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
     const min = clamp(Number(searchParams.get("min") ?? 50) || 50, 0, 100);
     const limit = clamp(Number(searchParams.get("limit") ?? 30) || 30, 1, 200);
-    const debugMode = (searchParams.get("debug") || "") === "1";
-
-    if (!FINNHUB_API_KEY) {
-      return NextResponse.json({ error: "FINNHUB_API_KEY missing" }, { status: 500 });
-    }
 
     const results = await Promise.all(SYMBOLS.map((s) => fetchSymbolItems(s)));
     const flat = results.flatMap((r) => r.items);
@@ -237,7 +230,7 @@ export async function GET(req: Request) {
         asOf: new Date().toISOString(),
         range: { min, max: 100 },
         items,
-        ...(debugMode ? { debug: results.map((r) => r.debug) } : {}),
+        debug: results.map((r) => r.debug), // ✅ her zaman debug
       },
       { status: 200 }
     );

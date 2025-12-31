@@ -2,15 +2,92 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const clampInt = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
+/* =========================
+   CONFIG
+========================= */
+
+// Nasdaq-100'ün tamamını sonra DB'den alacağız.
+// Şimdilik 30-40 ticker yeter: hem hızlı hem rate-limit dostu.
+// İstersen listeyi büyütürüz.
+const NASDAQ100_SAMPLE: string[] = [
+  "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST",
+  "ADBE","PEP","CSCO","AMD","NFLX","INTC","AMGN","QCOM","TXN","INTU",
+  "BKNG","SBUX","ISRG","MU","GILD","MDLZ","ADI","PANW","VRTX","REGN",
+  "LRCX","KLAC","SNPS","CDNS","ABNB","MELI","ASML","ORLY","PYPL","MAR"
+];
+
+const CONCURRENCY = 4; // Aynı anda kaç ticker çağıracağız (rate limit için küçük tut)
+const DEFAULT_DAYS_BACK = 7; // haberleri kaç gün geri tarayalım
+const DEFAULT_PER_SYMBOL = 3; // her ticker için kaç haber
+const CANDLE_BUFFER_DAYS = 50; // candle için kaç gün geri (1D ve 5D yetmesi için)
+
+/* =========================
+   HELPERS
+========================= */
+
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
+const clampInt = (n: number, a: number, b: number) => clamp(Math.round(n), a, b);
+
+function dayStartUtc(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function toUnixSec(d: Date) {
+  return Math.floor(d.getTime() / 1000);
+}
+
+function scoreFromRet(
+  ret5d: number | null,
+  ret1d: number | null,
+  pricedIn: boolean | null,
+  retPre5: number | null
+) {
+  // Öncelik: 5D varsa onu kullan, yoksa 1D
+  const r = typeof ret5d === "number" ? ret5d : (typeof ret1d === "number" ? ret1d : null);
+  if (typeof r !== "number") return 50;
+
+  // 1D küçük hareket -> multiplier biraz daha yüksek
+  const mult = typeof ret5d === "number" ? 1000 : 1600;
+  const base = clamp(Math.round(Math.abs(r) * mult), 0, 50);
+
+  let pen = 0;
+  if (pricedIn && typeof retPre5 === "number") {
+    const ref = typeof ret5d === "number" ? ret5d : (typeof ret1d === "number" ? ret1d : 0);
+    pen = clamp(
+      Math.round(Math.max(0, Math.abs(retPre5) - Math.abs(ref)) * 1200),
+      0,
+      25
+    );
+  }
+
+  return clamp(50 + base - pen, 50, 100);
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, idx: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length) as any;
+  let i = 0;
+
+  const runners = new Array(limit).fill(0).map(async () => {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await worker(items[idx], idx);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
 
 type Item = {
   symbol: string;
   headline: string;
   type: string | null;
   publishedAt: string; // ISO
-  score: number;       // 50..100
+  score: number; // 50..100
   pricedIn: boolean | null;
   retPre5: number | null;
   ret1d: number | null;
@@ -18,143 +95,137 @@ type Item = {
   url: string | null;
 };
 
-const NDX = [
-  "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST",
-  "ADBE","PEP","CSCO","NFLX","AMD","INTC","QCOM","TXN","AMGN","HON",
-  "INTU","CMCSA","SBUX","BKNG","ISRG","MU","PYPL","AMAT","MDLZ","ADI",
-  "LRCX","GILD","VRTX","REGN","PANW","SNPS","CDNS","KLAC","PDD","ABNB",
-  "MRNA","CRWD","MELI","ORLY","MAR","NXPI","CTAS","WDAY","AEP","KDP"
-];
-
-function dayStartUtc(date: Date) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-}
-function toUnixSec(d: Date) {
-  return Math.floor(d.getTime() / 1000);
-}
-
-async function mapLimit<T, R>(
-  arr: T[],
-  limit: number,
-  fn: (x: T, i: number) => Promise<R>
-): Promise<R[]> {
-  const out: R[] = new Array(arr.length) as any;
-  let i = 0;
-  const workers = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
-    while (true) {
-      const idx = i++;
-      if (idx >= arr.length) return;
-      out[idx] = await fn(arr[idx], idx);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
-
-function scoreFromRet(ret5d: number | null, pricedIn: boolean | null, retPre5: number | null) {
-  if (typeof ret5d !== "number") return 50;
-  const base = clamp(Math.round(Math.abs(ret5d) * 1000), 0, 50);
-  let pen = 0;
-  if (pricedIn && typeof retPre5 === "number") {
-    pen = clamp(Math.round(Math.max(0, Math.abs(retPre5) - Math.abs(ret5d)) * 1200), 0, 25);
-  }
-  return clamp(50 + base - pen, 50, 100);
-}
+/* =========================
+   ROUTE
+========================= */
 
 export async function GET(req: Request) {
   try {
     const key = process.env.FINNHUB_API_KEY;
-    if (!key) return NextResponse.json({ error: "Missing FINNHUB_API_KEY" }, { status: 500 });
+    if (!key) {
+      return NextResponse.json({ error: "Missing FINNHUB_API_KEY" }, { status: 500 });
+    }
 
     const { searchParams } = new URL(req.url);
+
     const min = clampInt(Number(searchParams.get("min") ?? 50) || 50, 0, 100);
     const max = clampInt(Number(searchParams.get("max") ?? 100) || 100, 0, 100);
-    const limit = clampInt(Number(searchParams.get("limit") ?? 30) || 30, 1, 200);
+    const limit = clampInt(Number(searchParams.get("limit") ?? 30) || 30, 1, 500);
+
+    const daysBack = clampInt(Number(searchParams.get("days") ?? DEFAULT_DAYS_BACK) || DEFAULT_DAYS_BACK, 1, 30);
+    const perSymbol = clampInt(Number(searchParams.get("perSymbol") ?? DEFAULT_PER_SYMBOL) || DEFAULT_PER_SYMBOL, 1, 10);
+
+    // Universe (istersen query ile daraltırsın)
+    const symbols = NASDAQ100_SAMPLE;
 
     const now = new Date();
-    // ✅ Daha geniş pencere: 7 gün haber, 200 gün mum (tatiller/haftasonu güvenli)
-    const fromNews = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
-    const fromPrice = new Date(now.getTime() - 200 * 24 * 3600 * 1000);
+    const fromNews = new Date(now.getTime() - daysBack * 24 * 3600 * 1000);
+    const fromCandle = new Date(now.getTime() - CANDLE_BUFFER_DAYS * 24 * 3600 * 1000);
 
-    const maxTickers = clampInt(Number(process.env.MAX_TICKERS ?? 30) || 30, 5, NDX.length);
-    const concurrency = clampInt(Number(process.env.SCAN_CONCURRENCY ?? 6) || 6, 1, 12);
+    const fromC = toUnixSec(fromCandle);
+    const toC = toUnixSec(now);
 
-    const symbols = NDX.slice(0, maxTickers);
-
-    const perSymbol = await mapLimit(symbols, concurrency, async (symbol) => {
-      // 1) news
+    const perSymbolResults = await mapLimit(symbols, CONCURRENCY, async (symbol) => {
+      // 1) Haberler
       const newsUrl =
         `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(symbol)}` +
         `&from=${fromNews.toISOString().slice(0, 10)}&to=${now.toISOString().slice(0, 10)}&token=${key}`;
 
-      const nRes = await fetch(newsUrl, { cache: "no-store" });
-      if (!nRes.ok) return null;
-
-      const news = (await nRes.json().catch(() => null)) as any[] | null;
+      const newsRes = await fetch(newsUrl, { cache: "no-store" });
+      if (!newsRes.ok) return null;
+      const news = (await newsRes.json()) as any[];
       if (!Array.isArray(news) || news.length === 0) return null;
 
-      // ✅ tek haber yerine: ilk 3 habere bak, çalışır olanı seç
-      const candidates = news.slice(0, 3);
-
-      // 2) candles (1 kez çek)
-      const from = toUnixSec(fromPrice);
-      const to = toUnixSec(now);
-
-      const cUrl =
+      // 2) Candle (Daily)
+      const candlesUrl =
         `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}` +
-        `&resolution=D&from=${from}&to=${to}&token=${key}`;
+        `&resolution=D&from=${fromC}&to=${toC}&token=${key}`;
 
-      const cRes = await fetch(cUrl, { cache: "no-store" });
-      const candles = await cRes.json().catch(() => null) as any;
+      const cRes = await fetch(candlesUrl, { cache: "no-store" });
+      if (!cRes.ok) return null;
+      const candles = await cRes.json();
 
-      const tArr: number[] = Array.isArray(candles?.t) ? candles.t : [];
-      const cArr: number[] = Array.isArray(candles?.c) ? candles.c : [];
+      if (candles?.s !== "ok" || !Array.isArray(candles?.t) || !Array.isArray(candles?.c)) {
+        return null;
+      }
 
-      // ✅ Mum yoksa bile haber item’ı döndür (ret’ler null)
-      const hasCandles = candles?.s === "ok" && tArr.length >= 2 && cArr.length >= 2;
+      const tArr: number[] = candles.t; // unix seconds (day start UTC)
+      const cArr: number[] = candles.c;
 
-      for (const n of candidates) {
+      if (tArr.length < 8 || cArr.length < 8) return null;
+
+      // Haber zamanını candle index'e eşle: "haber günü veya sonraki ilk işlem günü"
+      const findIndexForNewsTime = (newsTimeSec: number) => {
+        const d = dayStartUtc(new Date(newsTimeSec * 1000));
+        const daySec = Math.floor(d.getTime() / 1000);
+
+        // first candle with t >= daySec
+        let lo = 0, hi = tArr.length - 1, ans = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (tArr[mid] >= daySec) {
+            ans = mid;
+            hi = mid - 1;
+          } else lo = mid + 1;
+        }
+        return ans;
+      };
+
+      // Haberleri seç: çok tekrar edenleri azalt (aynı headline)
+      const used = new Set<string>();
+      const picked: any[] = [];
+      for (const n of news) {
+        const headline = String(n?.headline || "").trim();
+        if (!headline) continue;
+        const hkey = headline.toLowerCase();
+        if (used.has(hkey)) continue;
+        used.add(hkey);
+        picked.push(n);
+        if (picked.length >= perSymbol) break;
+      }
+
+      if (picked.length === 0) return null;
+
+      const out: Item[] = [];
+
+      for (const n of picked) {
         const headline = String(n?.headline || "").trim();
         const publishedSec = Number(n?.datetime || 0);
         if (!headline || !publishedSec) continue;
 
-        let ret1d: number | null = null;
-        let ret5d: number | null = null;
-        let retPre5: number | null = null;
-        let pricedIn: boolean | null = null;
+        const idx = findIndexForNewsTime(publishedSec);
+        if (idx < 0) continue;
 
-        if (hasCandles) {
-          const newsDay = dayStartUtc(new Date(publishedSec * 1000));
-          const newsDaySec = Math.floor(newsDay.getTime() / 1000);
+        const base = typeof cArr[idx] === "number" ? cArr[idx] : null;
 
-          // first t >= newsDaySec
-          let lo = 0, hi = tArr.length - 1, idx = -1;
-          while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (tArr[mid] >= newsDaySec) { idx = mid; hi = mid - 1; }
-            else lo = mid + 1;
-          }
+        // +1D, +5D
+        const ret1d =
+          base && idx + 1 < cArr.length && typeof cArr[idx + 1] === "number"
+            ? cArr[idx + 1] / base - 1
+            : null;
 
-          if (idx >= 0 && idx < cArr.length) {
-            const base = cArr[idx];
-            if (base) {
-              const i1 = Math.min(idx + 1, cArr.length - 1);
-              const i5 = Math.min(idx + 5, cArr.length - 1);
-              ret1d = (i1 !== idx) ? (cArr[i1] / base - 1) : null;
-              ret5d = (i5 !== idx) ? (cArr[i5] / base - 1) : null;
+        const ret5d =
+          base && idx + 5 < cArr.length && typeof cArr[idx + 5] === "number"
+            ? cArr[idx + 5] / base - 1
+            : null;
 
-              if (idx - 5 >= 0) retPre5 = base / cArr[idx - 5] - 1;
+        // Pre5: haber gününden önceki 5. işlem günü (varsa)
+        const preBase =
+          idx - 5 >= 0 && typeof cArr[idx - 5] === "number" ? cArr[idx - 5] : null;
 
-              if (typeof retPre5 === "number" && typeof ret5d === "number") {
-                pricedIn = Math.abs(retPre5) > Math.abs(ret5d) * 0.9;
-              }
-            }
-          }
-        }
+        const retPre5 =
+          base && preBase ? base / preBase - 1 : null;
 
-        const score = scoreFromRet(ret5d, pricedIn, retPre5);
+        const pricedIn =
+          typeof retPre5 === "number" && typeof ret5d === "number"
+            ? Math.abs(retPre5) > Math.abs(ret5d) * 0.9
+            : (typeof retPre5 === "number" && typeof ret1d === "number"
+              ? Math.abs(retPre5) > Math.abs(ret1d) * 0.9
+              : null);
 
-        const item: Item = {
+        const score = scoreFromRet(ret5d, ret1d, pricedIn, retPre5);
+
+        out.push({
           symbol,
           headline,
           type: n?.category ? String(n.category) : null,
@@ -165,15 +236,17 @@ export async function GET(req: Request) {
           ret1d,
           ret5d,
           url: n?.url ? String(n.url) : null,
-        };
-
-        return item;
+        });
       }
 
-      return null;
+      return out.length ? out : null;
     });
 
-    const items = (perSymbol.filter(Boolean) as Item[])
+    // Flatten
+    const flat = (perSymbolResults.filter(Boolean) as any[]).flat().filter(Boolean) as Item[];
+
+    // Filter + sort + limit
+    const items = flat
       .filter((x) => x.score >= min && x.score <= max)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
@@ -182,13 +255,21 @@ export async function GET(req: Request) {
       {
         asOf: new Date().toISOString(),
         range: { min, max },
-        scanned: symbols.length,
-        returned: items.length,
+        meta: {
+          universe: symbols.length,
+          daysBack,
+          perSymbol,
+          concurrency: CONCURRENCY,
+          returned: items.length,
+        },
         items,
       },
       { status: 200 }
     );
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Unknown error" }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || "Unknown error" },
+      { status: 500 }
+    );
   }
 }

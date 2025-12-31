@@ -1,5 +1,5 @@
 'use client';
- 
+
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 
@@ -37,12 +37,6 @@ function scoreBadge(score: number) {
   return 'bg-slate-500/10 text-slate-300 border-slate-500/20';
 }
 
-function pricedInBadge(v: boolean | null | undefined) {
-  if (v === true) return { txt: '✅ Priced-in', cls: 'bg-slate-500/10 text-slate-300 border-slate-500/20' };
-  if (v === false) return { txt: '🔥 Not priced', cls: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20' };
-  return { txt: '—', cls: 'bg-slate-500/10 text-slate-300 border-slate-500/20' };
-}
-
 /* ================= PAGE ================= */
 export default function HomePage() {
   const [data, setData] = useState<LeaderboardResponse | null>(null);
@@ -52,6 +46,12 @@ export default function HomePage() {
   const [minScore, setMinScore] = useState(50);
   const [limit, setLimit] = useState(30);
   const [q, setQ] = useState('');
+
+  // ✅ Yeni: UI sort
+  const [sortBy, setSortBy] = useState<'score' | 'newest'>('score');
+
+  // ✅ Yeni: Üstte kaç tane kart gösterelim?
+  const [topN, setTopN] = useState(10);
 
   useEffect(() => {
     let alive = true;
@@ -69,21 +69,30 @@ export default function HomePage() {
         if (alive) setLoading(false);
       }
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [minScore, limit]);
 
   const filtered = useMemo(() => {
     const items = data?.items || [];
     const qq = q.trim().toLowerCase();
-    if (!qq) return items;
-    return items.filter((it) =>
-      [it.symbol, it.headline, it.type].join(' ').toLowerCase().includes(qq)
-    );
-  }, [data, q]);
 
-  const top3 = filtered.slice(0, 3);
+    const searched = !qq
+      ? items
+      : items.filter((it) => [it.symbol, it.headline, it.type].join(' ').toLowerCase().includes(qq));
+
+    // ✅ UI sort: skor veya en yeni
+    const sorted = [...searched].sort((a, b) => {
+      if (sortBy === 'newest') {
+        return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+      }
+      // default score
+      return b.score - a.score;
+    });
+
+    return sorted;
+  }, [data, q, sortBy]);
+
+  const topCards = filtered.slice(0, topN);
 
   /* ================= RENDER ================= */
   return (
@@ -137,25 +146,79 @@ export default function HomePage() {
                 placeholder="Search ticker or keyword"
                 className="px-4 py-2 rounded-xl bg-slate-900 border border-white/10"
               />
-              <select value={minScore} onChange={(e) => setMinScore(+e.target.value)} className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10">
-                {[50, 60, 70, 80].map(v => <option key={v} value={v}>Score ≥ {v}</option>)}
+
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
+                title="Sort"
+              >
+                <option value="score">Sort: Highest score</option>
+                <option value="newest">Sort: Newest first</option>
               </select>
-              <select value={limit} onChange={(e) => setLimit(+e.target.value)} className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10">
-                {[20, 30, 50, 100].map(v => <option key={v} value={v}>Top {v}</option>)}
+
+              <select
+                value={minScore}
+                onChange={(e) => setMinScore(+e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
+              >
+                {[40, 50, 60, 70, 80].map(v => (
+                  <option key={v} value={v}>Score ≥ {v}</option>
+                ))}
+              </select>
+
+              <select
+                value={limit}
+                onChange={(e) => setLimit(+e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
+              >
+                {[20, 30, 50, 100].map(v => (
+                  <option key={v} value={v}>Top {v}</option>
+                ))}
+              </select>
+
+              <select
+                value={topN}
+                onChange={(e) => setTopN(+e.target.value)}
+                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
+                title="Top cards"
+              >
+                {[3, 6, 10, 12].map(v => (
+                  <option key={v} value={v}>Cards: {v}</option>
+                ))}
               </select>
             </div>
           </div>
 
-          {/* TOP 3 */}
-          {top3.length > 0 && (
-            <div className="grid sm:grid-cols-3 gap-4 px-5 pb-4">
-              {top3.map(it => (
-                <div key={it.symbol} className="rounded-2xl bg-emerald-500/10 border border-emerald-500/20 p-4">
-                  <div className="text-xs font-black text-emerald-300">TOP IMPACT</div>
-                  <div className="text-lg font-black">{it.symbol}</div>
-                  <div className="text-sm text-slate-200 mt-1">{it.headline}</div>
-                  <div className="mt-2 text-xs text-slate-300">Score: {it.score}</div>
-                </div>
+          {/* TOP CARDS */}
+          {topCards.length > 0 && (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 px-5 pb-4">
+              {topCards.map((it) => (
+                <Link
+                  key={`${it.symbol}-${it.publishedAt}`}
+                  href={`/ticker/${it.symbol}`}
+                  className="block rounded-2xl bg-emerald-500/10 border border-emerald-500/20 p-4 hover:bg-emerald-500/15 transition"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-black text-emerald-300">TOP IMPACT</div>
+                    <span className={`px-2 py-1 text-xs rounded-full border ${scoreBadge(it.score)}`}>
+                      {it.score}
+                    </span>
+                  </div>
+
+                  <div className="text-lg font-black mt-1">{it.symbol}</div>
+                  <div className="text-sm text-slate-200 mt-1 line-clamp-3">{it.headline}</div>
+
+                  <div className="mt-3 text-xs text-slate-400">
+                    {new Date(it.publishedAt).toLocaleString()}
+                  </div>
+
+                  {it.url && (
+                    <div className="mt-2 text-xs text-slate-300 underline underline-offset-4">
+                      Source link available →
+                    </div>
+                  )}
+                </Link>
               ))}
             </div>
           )}
@@ -166,8 +229,8 @@ export default function HomePage() {
             {!loading && err && <div className="py-6 text-red-300">{err}</div>}
             {!loading && !err && filtered.length === 0 && (
               <div className="py-10 text-center">
-                <div className="text-lg font-black">No high-impact news yet</div>
-                <div className="text-slate-400 mt-2">Markets are calm. Try lowering the score.</div>
+                <div className="text-lg font-black">No results</div>
+                <div className="text-slate-400 mt-2">Try lowering the score or changing sort.</div>
               </div>
             )}
 
@@ -175,30 +238,41 @@ export default function HomePage() {
               <table className="w-full text-sm">
                 <thead className="text-slate-400 border-b border-white/10">
                   <tr>
-                    <th>#</th><th>Ticker</th><th>Headline</th><th>Score</th><th>+1D</th><th>+5D</th>
+                    <th className="text-left py-2">#</th>
+                    <th className="text-left py-2">Ticker</th>
+                    <th className="text-left py-2">Headline</th>
+                    <th className="text-left py-2">Score</th>
+                    <th className="text-left py-2">+1D</th>
+                    <th className="text-left py-2">+5D</th>
+                    <th className="text-left py-2">Published</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((it, i) => {
-                    const p = pricedInBadge(it.pricedIn);
-                    return (
-                      <tr key={i} className="border-b border-white/5">
-                        <td>{i + 1}</td>
-                        <td>
-                          <Link href={`/ticker/${it.symbol}`} className="text-emerald-300 font-black hover:underline">
-                            {it.symbol}
-                          </Link>
-                        </td>
-                        <td>{it.headline}</td>
-                        <td><span className={`px-2 py-1 rounded-full border ${scoreBadge(it.score)}`}>{it.score}</span></td>
-                        <td>{fmtPct(it.ret1d)}</td>
-                        <td>{fmtPct(it.ret5d)}</td>
-                      </tr>
-                    );
-                  })}
+                  {filtered.map((it, i) => (
+                    <tr key={`${it.symbol}-${it.publishedAt}-${i}`} className="border-b border-white/5">
+                      <td className="py-2">{i + 1}</td>
+                      <td className="py-2">
+                        <Link href={`/ticker/${it.symbol}`} className="text-emerald-300 font-black hover:underline">
+                          {it.symbol}
+                        </Link>
+                      </td>
+                      <td className="py-2">{it.headline}</td>
+                      <td className="py-2">
+                        <span className={`px-2 py-1 rounded-full border ${scoreBadge(it.score)}`}>{it.score}</span>
+                      </td>
+                      <td className="py-2">{fmtPct(it.ret1d)}</td>
+                      <td className="py-2">{fmtPct(it.ret5d)}</td>
+                      <td className="py-2 text-slate-400">{new Date(it.publishedAt).toLocaleString()}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             )}
+          </div>
+
+          {/* FOOTER NOTE */}
+          <div className="px-5 pb-5 text-xs text-slate-500">
+            Tip: If you always see the same tickers, switch Sort to “Newest first” or lower Score.
           </div>
         </div>
       </section>

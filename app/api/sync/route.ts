@@ -241,26 +241,3 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Global sync error", details: globalError.message }, { status: 500 });
   }
 }
-          externalId: newsHash,
-          score: {
-            create: {
-              score: calculated.score,
-              pricedIn: calculated.pricedIn,
-              ret1d: item.ret1d,
-              ret5d: item.ret5d,
-              retPre5: item.retPre5
-            }
-          }
-        }
-      });
-      */
-      
-      results.push(`Synced ${t.symbol}`);
-    }
-
-    return NextResponse.json({ ok: true, synced: results });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-}
-  

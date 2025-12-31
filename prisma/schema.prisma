@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Ticker {
+  id     Int    @id @default(autoincrement())
+  symbol String @unique
+
+  newsEvents NewsEvent[]
+  newsScores NewsScore[]
+}
+
+model NewsEvent {
+  id          Int      @id @default(autoincrement())
+  tickerId    Int
+  ticker      Ticker   @relation(fields: [tickerId], references: [id])
+
+  headline    String
+  url         String?
+  type        String?
+  publishedAt DateTime
+  hash        String   @unique
+
+  scores NewsScore[]
+}
+
+model NewsScore {
+  id          Int      @id @default(autoincrement())
+  tickerId    Int
+  newsEventId Int
+
+  ticker    Ticker    @relation(fields: [tickerId], references: [id])
+  newsEvent NewsEvent @relation(fields: [newsEventId], references: [id])
+
+  retPre5   Float?
+  ret1d     Float?
+  ret5d     Float?
+  pricedIn  Boolean?
+  score     Int
+
+  calculatedAt DateTime @default(now())
+
+  @@index([tickerId])
+  @@index([newsEventId])
+}

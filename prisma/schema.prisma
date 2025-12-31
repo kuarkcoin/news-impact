@@ -1,50 +1,59 @@
+// prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "postgresql" // Vercel Postgres, Supabase, Neon veya Local
   url      = env("DATABASE_URL")
 }
 
 model Ticker {
-  id     Int    @id @default(autoincrement())
-  symbol String @unique
+  symbol    String   @id
+  name      String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
 
-  newsEvents NewsEvent[]
-  newsScores NewsScore[]
+  news NewsEvent[]
 }
 
 model NewsEvent {
-  id          Int      @id @default(autoincrement())
-  tickerId    Int
-  ticker      Ticker   @relation(fields: [tickerId], references: [id])
-
+  id          String   @id @default(uuid())
+  tickerSymbol String
   headline    String
   url         String?
-  type        String?
+  type        String?  // Earnings, Analyst vb.
   publishedAt DateTime
-  hash        String   @unique
+  
+  // Finnhub'dan gelen raw ID veya hash (tekrarı önlemek için)
+  externalId  String?  @unique 
 
-  scores NewsScore[]
+  // İlişki
+  ticker      Ticker   @relation(fields: [tickerSymbol], references: [symbol])
+  score       NewsScore?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tickerSymbol])
+  @@index([publishedAt])
 }
 
 model NewsScore {
-  id          Int      @id @default(autoincrement())
-  tickerId    Int
-  newsEventId Int
-
-  ticker    Ticker    @relation(fields: [tickerId], references: [id])
-  newsEvent NewsEvent @relation(fields: [newsEventId], references: [id])
-
-  retPre5   Float?
-  ret1d     Float?
-  ret5d     Float?
-  pricedIn  Boolean?
-  score     Int
-
+  id          String    @id @default(uuid())
+  newsEventId String    @unique
+  
+  score       Int       // 0-100 arası nihai puan
+  pricedIn    Boolean   @default(false)
+  
+  // Hesaplanan getiriler (analiz için saklıyoruz)
+  retPre5     Float?
+  ret1d       Float?
+  ret5d       Float?
+  
   calculatedAt DateTime @default(now())
 
-  @@index([tickerId])
-  @@index([newsEventId])
+  // İlişki
+  newsEvent   NewsEvent @relation(fields: [newsEventId], references: [id], onDelete: Cascade)
 }

@@ -1,46 +1,23 @@
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 60; // Timeout süresini artırdık
 
-// Hisseler
-const SYMBOLS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD", "AMZN", "META", "GOOGL"];
+// Hisseleri azalttık (Test için 5 tane yeterli, çok olursa yavaşlar)
+const SYMBOLS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD"];
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
-// --- DEMO VERİ (Acil Durum Çekici) ---
-// Eğer API limitine takılırsan veya haber bulamazsan bu devreye girer.
+// --- DEMO VERİ (Eğer her şey ters giderse bu görünür) ---
 const DEMO_ITEMS = [
   {
-    symbol: "DEMO-AAPL",
-    headline: "Apple Unveils New AI Strategy (Fallback Data)",
-    type: "Technology",
+    symbol: "DEMO-ERR",
+    headline: "Hız Sınırı veya API Hatası - Lütfen Vercel Loglarını Kontrol Et",
+    type: "Error",
     publishedAt: new Date().toISOString(),
     url: "#",
-    retPre5: 0.02,
-    ret1d: 0.03,
-    ret5d: 0.05,
+    retPre5: 0, ret1d: 0, ret5d: 0,
     pricedIn: false,
-    score: 85, 
-    expectedImpact: 85,
-    realizedImpact: 85,
-    confidence: 80,
-    tooEarly: false
-  },
-  {
-    symbol: "DEMO-NVDA",
-    headline: "Chip Demand Skyrockets in Q4 (Fallback Data)",
-    type: "Earnings",
-    publishedAt: new Date().toISOString(),
-    url: "#",
-    retPre5: -0.01,
-    ret1d: 0.06,
-    ret5d: 0.12,
-    pricedIn: false,
-    score: 92,
-    expectedImpact: 92,
-    realizedImpact: 92,
-    confidence: 90,
-    tooEarly: false
+    score: 50, expectedImpact: 50, realizedImpact: 50, confidence: 0, tooEarly: true
   }
 ];
 
@@ -66,16 +43,12 @@ type LeaderItem = {
 };
 
 function scoreFromReturns(ret5d: number | null, ret1d: number | null, retPre5: number | null) {
-  // Eğer hiç veri yoksa (haber bugün çıktıysa ve piyasa kapalıysa)
+  // Veri yoksa
   if (ret1d === null && ret5d === null) {
-    return {
-      expectedImpact: 50, realizedImpact: 50, pricedIn: null, confidence: 0, tooEarly: true, score: 50
-    };
+    return { expectedImpact: 50, realizedImpact: 50, pricedIn: null, confidence: 0, tooEarly: true, score: 50 };
   }
 
-  // Veri varsa kullan (5D yoksa 1D kullan)
   const rUsed = ret5d ?? ret1d ?? 0;
-  
   const realizedBase = clamp(Math.round(Math.abs(rUsed) * 1000), 0, 50);
   const realizedImpact = clamp(50 + realizedBase, 50, 100);
 
@@ -91,10 +64,9 @@ function scoreFromReturns(ret5d: number | null, ret1d: number | null, retPre5: n
 
   const expectedImpact = clamp(50 + realizedBase - pen, 50, 100);
 
-  let conf = 20; // Başlangıç güveni
+  let conf = 20;
   if (ret1d !== null) conf += 20;
-  if (ret5d !== null) conf += 40; // 5 günlük veri varsa güven artar
-  if (typeof retPre5 === "number") conf += 10;
+  if (ret5d !== null) conf += 40;
   
   return {
     expectedImpact,
@@ -114,60 +86,65 @@ async function fetchCandles(symbol: string, fromUnix: number, toUnix: number) {
       symbol
     )}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
     
-    // Cache süresini uzattık (3 saat), API limitini korumak için
-    const res = await fetch(url, { next: { revalidate: 10800 } }); 
-    if (!res.ok) return null;
+    // Cache yok, her seferinde taze veri dene (Debug için)
+    const res = await fetch(url, { cache: 'no-store' }); 
+    if (!res.ok) {
+        console.log(`Candle Error ${symbol}: ${res.status}`);
+        return null;
+    }
     const data = await res.json();
-    if (data?.s !== "ok" || !Array.isArray(data?.t) || !Array.isArray(data?.c)) return null;
+    if (data?.s !== "ok") return null;
     return { t: data.t as number[], c: data.c as number[] };
-  } catch { return null; }
+  } catch (e) { 
+    console.log(`Candle Fetch Exception ${symbol}:`, e);
+    return null; 
+  }
 }
 
 async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
-  if (!FINNHUB_API_KEY) return [];
-
   const now = new Date();
-  // BUGÜNE KADAR olan haberleri al (Filtreyi gevşettik)
-  const toDate = now; 
   // 30 gün geriye git
   const fromDate = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
-
   const toUnix = Math.floor(now.getTime() / 1000);
   const fromUnix = Math.floor(toUnix - 120 * 24 * 3600);
 
   try {
     // 1) News
     const newsRes = await fetch(
-      `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromDate.toISOString().slice(0,10)}&to=${toDate.toISOString().slice(0,10)}&token=${FINNHUB_API_KEY}`,
-      { next: { revalidate: 300 } } // 5dk cache
+      `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromDate.toISOString().slice(0,10)}&to=${now.toISOString().slice(0,10)}&token=${FINNHUB_API_KEY}`,
+      { cache: 'no-store' }
     );
-    if (!newsRes.ok) return [];
+    if (!newsRes.ok) {
+        console.log(`News Error ${symbol}: ${newsRes.status}`);
+        return [];
+    }
     const news = await newsRes.json();
-    if (!Array.isArray(news) || news.length === 0) return [];
+    if (!Array.isArray(news) || news.length === 0) {
+        console.log(`No news found for ${symbol}`);
+        return [];
+    }
 
     // 2) Candles
     const candles = await fetchCandles(symbol, fromUnix, toUnix);
-    if (!candles) return []; // Candle yoksa hesaplayamayız
-
+    
+    // Eğer candle yoksa, haberi yine de göster ama puanı 50 yap (Veri kaybını önle)
+    // Sadece en yeni 2 haberi al
     const items: LeaderItem[] = [];
-    const seen = new Set<string>();
-
-    // En yeni 3 haberi al
-    for (const n of news.slice(0, 3)) {
+    
+    for (const n of news.slice(0, 2)) {
       if (!n.headline || !n.datetime) continue;
+
+      let ret1d = null, ret5d = null, retPre5 = null;
       
-      const key = `${symbol}-${n.datetime}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const idx = candles.t.findIndex((t: number) => t >= n.datetime);
-      if (idx === -1) continue;
-
-      const base = candles.c[idx];
-      // Güvenli erişim
-      const ret1d = (idx + 1 < candles.c.length) ? (candles.c[idx + 1] - base) / base : null;
-      const ret5d = (idx + 5 < candles.c.length) ? (candles.c[idx + 5] - base) / base : null;
-      const retPre5 = (idx - 5 >= 0) ? (base - candles.c[idx - 5]) / candles.c[idx - 5] : null;
+      if (candles) {
+        const idx = candles.t.findIndex((t: number) => t >= n.datetime);
+        if (idx !== -1) {
+            const base = candles.c[idx];
+            if (idx + 1 < candles.c.length) ret1d = (candles.c[idx + 1] - base) / base;
+            if (idx + 5 < candles.c.length) ret5d = (candles.c[idx + 5] - base) / base;
+            if (idx - 5 >= 0) retPre5 = (base - candles.c[idx - 5]) / candles.c[idx - 5];
+        }
+      }
 
       const scores = scoreFromReturns(ret5d, ret1d, retPre5);
 
@@ -183,46 +160,54 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     }
     return items;
   } catch (e) {
-    console.error(e);
+    console.error(`Error processing ${symbol}:`, e);
     return [];
   }
 }
 
 export async function GET(req: Request) {
   try {
-    // API KEY YOKSA DİREKT DEMO DÖN
     if (!FINNHUB_API_KEY) {
+      console.log("API Key Missing inside GET");
       return NextResponse.json({ asOf: new Date().toISOString(), items: DEMO_ITEMS });
     }
 
-    const { searchParams } = new URL(req.url);
-    const min = Number(searchParams.get("min") ?? 0); // Varsayılan filtreyi 0 yaptık ki her şeyi görelim
+    // --- ÖNEMLİ DEĞİŞİKLİK: SIRALI (SEQUENTIAL) ÇEKİM ---
+    // Promise.all YERİNE for döngüsü kullanıyoruz.
+    // Bu sayede API'ye aynı anda 8 istek gitmiyor, tek tek gidiyor.
+    // Hız sınırı hatası (429) almanı engeller.
+    
+    const allItems: LeaderItem[] = [];
+    
+    console.log("Starting sequential fetch...");
+    
+    for (const sym of SYMBOLS) {
+        // Her istekten önce biraz bekle (Rate Limit Koruması)
+        // await new Promise(r => setTimeout(r, 200)); 
+        const items = await fetchSymbolItems(sym);
+        allItems.push(...items);
+    }
 
-    // Paralel Çekim
-    const all = await Promise.all(SYMBOLS.map(s => fetchSymbolItems(s)));
-    const flat = all.flat();
+    console.log(`Total items fetched: ${allItems.length}`);
 
-    // EĞER API BOŞ DÖNERSE DEMO VERİ GÖSTER (Kurtarıcı)
-    if (flat.length === 0) {
-      console.log("API boş döndü, Demo veri gösteriliyor.");
+    if (allItems.length === 0) {
+      console.log("Fetched 0 items, returning DEMO");
       return NextResponse.json({
         asOf: new Date().toISOString(),
         items: DEMO_ITEMS
       });
     }
 
-    // Sırala ve Filtrele
-    const items = flat
-      .filter(x => x.score >= min)
-      .sort((a, b) => b.score - a.score);
+    // Sırala
+    allItems.sort((a, b) => b.score - a.score);
 
     return NextResponse.json({
       asOf: new Date().toISOString(),
-      items
+      items: allItems
     });
 
   } catch (e) {
-    // HATA DURUMUNDA DA DEMO GÖSTER
+    console.error("Global Error:", e);
     return NextResponse.json({ asOf: new Date().toISOString(), items: DEMO_ITEMS });
   }
 }

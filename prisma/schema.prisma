@@ -5,8 +5,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql" // Vercel Postgres, Supabase, Neon veya Local
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")  // Transaction Mode (Port 6543) - Uygulama burayı kullanır
+  directUrl = env("DIRECT_URL")    // Session Mode (Port 5432) - Migration burayı kullanır
 }
 
 model Ticker {
@@ -19,41 +20,40 @@ model Ticker {
 }
 
 model NewsEvent {
-  id          String   @id @default(uuid())
+  id           String   @id @default(uuid())
   tickerSymbol String
-  headline    String
-  url         String?
-  type        String?  // Earnings, Analyst vb.
-  publishedAt DateTime
+  headline     String
+  url          String?
+  type         String?  // Earnings, Analyst vb.
+  publishedAt  DateTime
   
-  // Finnhub'dan gelen raw ID veya hash (tekrarı önlemek için)
-  externalId  String?  @unique 
+  // Finnhub'dan gelen raw ID veya hash
+  externalId   String?  @unique 
 
   // İlişki
-  ticker      Ticker   @relation(fields: [tickerSymbol], references: [symbol])
-  score       NewsScore?
+  ticker       Ticker   @relation(fields: [tickerSymbol], references: [symbol])
+  score        NewsScore?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([tickerSymbol])
   @@index([publishedAt])
 }
 
 model NewsScore {
-  id          String    @id @default(uuid())
-  newsEventId String    @unique
+  id           String    @id @default(uuid())
+  newsEventId  String    @unique
   
-  score       Int       // 0-100 arası nihai puan
-  pricedIn    Boolean   @default(false)
+  score        Int       // 0-100 arası
+  pricedIn     Boolean   @default(false)
   
-  // Hesaplanan getiriler (analiz için saklıyoruz)
-  retPre5     Float?
-  ret1d       Float?
-  ret5d       Float?
+  retPre5      Float?
+  ret1d        Float?
+  ret5d        Float?
   
-  calculatedAt DateTime @default(now())
+  calculatedAt DateTime  @default(now())
 
   // İlişki
-  newsEvent   NewsEvent @relation(fields: [newsEventId], references: [id], onDelete: Cascade)
+  newsEvent    NewsEvent @relation(fields: [newsEventId], references: [id], onDelete: Cascade)
 }

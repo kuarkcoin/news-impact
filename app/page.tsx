@@ -3,13 +3,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 
-/* ================= TYPES ================= */
 type LeaderboardItem = {
   symbol: string;
   headline: string;
   type?: string | null;
-  publishedAt: string;
-  score: number;
+  publishedAt: string; // ISO
+  score: number; // 50..100
   pricedIn?: boolean | null;
   retPre5?: number | null;
   ret1d?: number | null;
@@ -23,21 +22,80 @@ type LeaderboardResponse = {
   items: LeaderboardItem[];
 };
 
-/* ================= HELPERS ================= */
+function clampInt(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
+function fmtDate(iso: string) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
 function fmtPct(x: number | null | undefined) {
-  if (typeof x !== 'number') return '—';
+  if (typeof x !== 'number' || Number.isNaN(x)) return '—';
   const v = x * 100;
   const sign = v > 0 ? '+' : '';
   return `${sign}${v.toFixed(2)}%`;
 }
 
-function scoreBadge(score: number) {
-  if (score >= 80) return 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20';
-  if (score >= 65) return 'bg-amber-500/10 text-amber-300 border-amber-500/20';
-  return 'bg-slate-500/10 text-slate-300 border-slate-500/20';
+function pctColor(x: number | null | undefined) {
+  if (typeof x !== 'number') return 'text-slate-300';
+  if (x > 0.001) return 'text-emerald-300';
+  if (x < -0.001) return 'text-rose-300';
+  return 'text-slate-300';
 }
 
-/* ================= PAGE ================= */
+function scoreTone(score: number) {
+  if (score >= 85) return { pill: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25', ring: 'ring-emerald-400/30' };
+  if (score >= 70) return { pill: 'bg-cyan-400/15 text-cyan-200 border-cyan-400/25', ring: 'ring-cyan-400/30' };
+  if (score >= 60) return { pill: 'bg-amber-400/15 text-amber-200 border-amber-400/25', ring: 'ring-amber-400/30' };
+  return { pill: 'bg-slate-400/10 text-slate-200 border-white/10', ring: 'ring-white/10' };
+}
+
+function pricedInUI(v: boolean | null | undefined) {
+  if (v === false) return { txt: '🔥 Not priced-in', cls: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25' };
+  if (v === true) return { txt: '⚠️ Mostly priced-in', cls: 'bg-amber-400/15 text-amber-200 border-amber-400/25' };
+  return { txt: '— Unclear', cls: 'bg-white/5 text-slate-200 border-white/10' };
+}
+
+function impactLabel(score: number) {
+  if (score >= 85) return 'TOP IMPACT';
+  if (score >= 70) return 'HIGH IMPACT';
+  if (score >= 60) return 'MED IMPACT';
+  return 'LOW IMPACT';
+}
+
+function impactBarWidth(score: number) {
+  // 50..100 -> 0..100 gibi göstermek daha dramatik
+  const w = (score - 50) * 2;
+  return clampInt(w, 0, 100);
+}
+
+function SkeletonCard() {
+  return (
+    <div className="rounded-3xl bg-white/5 border border-white/10 p-5 animate-pulse">
+      <div className="flex items-start justify-between gap-4">
+        <div className="h-5 w-24 bg-white/10 rounded-lg" />
+        <div className="h-8 w-12 bg-white/10 rounded-2xl" />
+      </div>
+      <div className="mt-4 h-8 w-20 bg-white/10 rounded-xl" />
+      <div className="mt-3 h-4 w-full bg-white/10 rounded-lg" />
+      <div className="mt-2 h-4 w-4/5 bg-white/10 rounded-lg" />
+      <div className="mt-5 h-2 w-full bg-white/10 rounded-full" />
+      <div className="mt-4 flex gap-2">
+        <div className="h-7 w-24 bg-white/10 rounded-full" />
+        <div className="h-7 w-24 bg-white/10 rounded-full" />
+      </div>
+    </div>
+  );
+}
+
+type SortKey = 'score' | 'newest' | 'ret5d';
+
 export default function HomePage() {
   const [data, setData] = useState<LeaderboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,246 +104,483 @@ export default function HomePage() {
   const [minScore, setMinScore] = useState(50);
   const [limit, setLimit] = useState(30);
   const [q, setQ] = useState('');
-
-  // ✅ Yeni: UI sort
-  const [sortBy, setSortBy] = useState<'score' | 'newest'>('score');
-
-  // ✅ Yeni: Üstte kaç tane kart gösterelim?
-  const [topN, setTopN] = useState(10);
+  const [sort, setSort] = useState<SortKey>('score');
+  const [view, setView] = useState<'grid' | 'list'>('grid');
+  const [perPage, setPerPage] = useState(10);
 
   useEffect(() => {
     let alive = true;
+
     (async () => {
       try {
         setLoading(true);
         setErr(null);
-        const res = await fetch(`/api/leaderboard?min=${minScore}&limit=${limit}`, { cache: 'no-store' });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json?.error || 'API error');
-        if (alive) setData(json);
+
+        const res = await fetch(`/api/leaderboard?min=${minScore}&limit=${limit}`, {
+          cache: 'no-store',
+        });
+
+        const json = (await res.json().catch(() => ({}))) as any;
+        if (!res.ok) throw new Error(json?.error || `API error: ${res.status}`);
+
+        if (alive) setData(json as LeaderboardResponse);
       } catch (e: any) {
         if (alive) setErr(e?.message || 'Unknown error');
       } finally {
         if (alive) setLoading(false);
       }
     })();
-    return () => { alive = false; };
+
+    return () => {
+      alive = false;
+    };
   }, [minScore, limit]);
 
+  const items = useMemo(() => data?.items || [], [data]);
+
+  const stats = useMemo(() => {
+    const n = items.length;
+    const top = items[0]?.score ?? null;
+    const avg = n ? items.reduce((a, b) => a + (b.score || 0), 0) / n : null;
+    const priced = n ? items.filter((x) => x.pricedIn === true).length : 0;
+    return {
+      n,
+      top,
+      avg,
+      priced,
+    };
+  }, [items]);
+
   const filtered = useMemo(() => {
-    const items = data?.items || [];
     const qq = q.trim().toLowerCase();
+    let arr = items;
 
-    const searched = !qq
-      ? items
-      : items.filter((it) => [it.symbol, it.headline, it.type].join(' ').toLowerCase().includes(qq));
+    if (qq) {
+      arr = arr.filter((it) => {
+        const a = (it.symbol || '').toLowerCase();
+        const b = (it.headline || '').toLowerCase();
+        const c = (it.type || '').toLowerCase();
+        return a.includes(qq) || b.includes(qq) || c.includes(qq);
+      });
+    }
 
-    // ✅ UI sort: skor veya en yeni
-    const sorted = [...searched].sort((a, b) => {
-      if (sortBy === 'newest') {
+    arr = [...arr].sort((a, b) => {
+      if (sort === 'newest') {
         return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
       }
-      // default score
-      return b.score - a.score;
+      if (sort === 'ret5d') {
+        const aa = typeof a.ret5d === 'number' ? a.ret5d : -999;
+        const bb = typeof b.ret5d === 'number' ? b.ret5d : -999;
+        return bb - aa;
+      }
+      return (b.score || 0) - (a.score || 0);
     });
 
-    return sorted;
-  }, [data, q, sortBy]);
+    return arr;
+  }, [items, q, sort]);
 
-  const topCards = filtered.slice(0, topN);
+  // pagination-like (client-side simple)
+  const paged = useMemo(() => filtered.slice(0, perPage), [filtered, perPage]);
 
-  /* ================= RENDER ================= */
   return (
     <div className="min-h-screen bg-slate-950 text-white">
-      {/* HERO */}
-      <section className="max-w-6xl mx-auto px-4 pt-10 pb-6">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[11px] font-black uppercase bg-white/5 border border-white/10">
-          📈 Nasdaq-100 News Impact
-        </div>
+      {/* Background glow */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-[900px] h-[900px] rounded-full bg-emerald-400/10 blur-[120px]" />
+        <div className="absolute top-[30%] -left-40 w-[500px] h-[500px] rounded-full bg-cyan-400/10 blur-[120px]" />
+        <div className="absolute bottom-[-120px] right-[-120px] w-[520px] h-[520px] rounded-full bg-indigo-400/10 blur-[120px]" />
+      </div>
 
-        <h1 className="text-4xl md:text-5xl font-black mt-4">
-          How markets react to news — <span className="text-emerald-300">measured.</span>
-        </h1>
-
-        <p className="text-slate-300 max-w-2xl mt-3">
-          We track Nasdaq news and rank events by real post-news price reactions.
-        </p>
-
-        {/* LIVE STATS */}
-        <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <Stat label="News events" value={data?.items.length ?? 0} />
-          <Stat label="High impact (≥80)" value={(data?.items || []).filter(i => i.score >= 80).length} accent />
-          <Stat
-            label="Avg score"
-            value={
-              data?.items.length
-                ? Math.round(data.items.reduce((a, b) => a + b.score, 0) / data.items.length)
-                : '—'
-            }
-          />
-          <Stat label="Tracked tickers" value="100" />
-        </div>
-      </section>
-
-      {/* LEADERBOARD */}
-      <section id="leaderboard" className="max-w-6xl mx-auto px-4 pb-16">
-        <div className="rounded-3xl bg-white/5 border border-white/10 overflow-hidden">
-          {/* CONTROLS */}
-          <div className="p-5 flex flex-col md:flex-row gap-4 md:items-center md:justify-between">
-            <div>
-              <div className="text-xl font-black">Top News Impact</div>
-              <div className="text-xs text-slate-400">
-                {data?.asOf ? `As of ${new Date(data.asOf).toLocaleString()}` : 'Live'}
+      <div className="relative">
+        {/* Top bar */}
+        <header className="w-full max-w-6xl mx-auto px-4 pt-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-10 h-10 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center font-black">
+                NI
+              </div>
+              <div>
+                <div className="font-black leading-tight">NewsImpact</div>
+                <div className="text-[11px] text-slate-400 leading-tight">Nasdaq news reaction ranking</div>
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Search ticker or keyword"
-                className="px-4 py-2 rounded-xl bg-slate-900 border border-white/10"
-              />
-
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as any)}
-                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
-                title="Sort"
+            <div className="flex items-center gap-2">
+              <Link
+                href="/methodology"
+                className="hidden sm:inline-flex items-center px-3 py-2 rounded-2xl bg-white/5 border border-white/10 text-sm font-semibold hover:bg-white/10 transition"
               >
-                <option value="score">Sort: Highest score</option>
-                <option value="newest">Sort: Newest first</option>
-              </select>
-
-              <select
-                value={minScore}
-                onChange={(e) => setMinScore(+e.target.value)}
-                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
+                Methodology
+              </Link>
+              <a
+                href="#leaderboard"
+                className="inline-flex items-center px-3 py-2 rounded-2xl bg-emerald-400 text-slate-950 text-sm font-black hover:opacity-95 transition"
               >
-                {[40, 50, 60, 70, 80].map(v => (
-                  <option key={v} value={v}>Score ≥ {v}</option>
-                ))}
-              </select>
-
-              <select
-                value={limit}
-                onChange={(e) => setLimit(+e.target.value)}
-                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
-              >
-                {[20, 30, 50, 100].map(v => (
-                  <option key={v} value={v}>Top {v}</option>
-                ))}
-              </select>
-
-              <select
-                value={topN}
-                onChange={(e) => setTopN(+e.target.value)}
-                className="px-3 py-2 rounded-xl bg-slate-900 border border-white/10"
-                title="Top cards"
-              >
-                {[3, 6, 10, 12].map(v => (
-                  <option key={v} value={v}>Cards: {v}</option>
-                ))}
-              </select>
+                View Ranking →
+              </a>
             </div>
           </div>
+        </header>
 
-          {/* TOP CARDS */}
-          {topCards.length > 0 && (
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 px-5 pb-4">
-              {topCards.map((it) => (
-                <Link
-                  key={`${it.symbol}-${it.publishedAt}`}
-                  href={`/ticker/${it.symbol}`}
-                  className="block rounded-2xl bg-emerald-500/10 border border-emerald-500/20 p-4 hover:bg-emerald-500/15 transition"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-xs font-black text-emerald-300">TOP IMPACT</div>
-                    <span className={`px-2 py-1 text-xs rounded-full border ${scoreBadge(it.score)}`}>
-                      {it.score}
-                    </span>
+        {/* Hero */}
+        <section className="w-full max-w-6xl mx-auto px-4 pt-10 pb-8">
+          <div className="grid md:grid-cols-12 gap-6 items-start">
+            <div className="md:col-span-7">
+              <div className="inline-flex items-center gap-2 w-fit px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-200">
+                📈 Nasdaq-100 News Impact • Data-driven
+              </div>
+
+              <h1 className="mt-4 text-3xl sm:text-4xl md:text-5xl font-black leading-tight">
+                Rank news by <span className="text-emerald-300">real market reaction</span>.
+              </h1>
+
+              <p className="mt-4 text-slate-300 max-w-2xl">
+                We scan news events and score impact from <b>50–100</b> using post-news returns (+1D / +5D) and a
+                <b> priced-in penalty</b>. It’s a fast way to spot what’s truly moving the tape.
+              </p>
+
+              <div className="mt-5 flex flex-wrap gap-2 text-xs">
+                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">⚡ Updated frequently</span>
+                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">🧠 Priced-in detection</span>
+                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">📊 +1D / +5D returns</span>
+              </div>
+            </div>
+
+            {/* Stat card */}
+            <div className="md:col-span-5">
+              <div className="rounded-3xl bg-white/5 border border-white/10 shadow-xl p-5">
+                <div className="flex items-center justify-between">
+                  <div className="font-black">Today Snapshot</div>
+                  <div className="text-[11px] text-slate-400">{data?.asOf ? fmtDate(data.asOf) : '—'}</div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-3 gap-3">
+                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
+                    <div className="text-[11px] text-slate-400">Events</div>
+                    <div className="mt-1 text-xl font-black">{stats.n || '—'}</div>
                   </div>
-
-                  <div className="text-lg font-black mt-1">{it.symbol}</div>
-                  <div className="text-sm text-slate-200 mt-1 line-clamp-3">{it.headline}</div>
-
-                  <div className="mt-3 text-xs text-slate-400">
-                    {new Date(it.publishedAt).toLocaleString()}
+                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
+                    <div className="text-[11px] text-slate-400">Top score</div>
+                    <div className="mt-1 text-xl font-black">{typeof stats.top === 'number' ? stats.top : '—'}</div>
                   </div>
+                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
+                    <div className="text-[11px] text-slate-400">Priced-in</div>
+                    <div className="mt-1 text-xl font-black">{stats.n ? `${stats.priced}` : '—'}</div>
+                  </div>
+                </div>
 
-                  {it.url && (
-                    <div className="mt-2 text-xs text-slate-300 underline underline-offset-4">
-                      Source link available →
+                <div className="mt-4 text-xs text-slate-400">
+                  Tip: Filter by <b>Score ≥ 70</b> to find higher-impact news.
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Controls + Board */}
+        <section id="leaderboard" className="w-full max-w-6xl mx-auto px-4 pb-16">
+          <div className="rounded-3xl bg-white/5 border border-white/10 shadow-xl overflow-hidden">
+            {/* Control header */}
+            <div className="p-5 md:p-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between border-b border-white/10">
+              <div>
+                <div className="text-xl font-black">Top News Impact</div>
+                <div className="text-xs text-slate-400 mt-1">
+                  {data?.asOf ? `As of ${fmtDate(data.asOf)}` : 'Live ranking'}
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+                <div className="relative">
+                  <input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="Search ticker or keyword…"
+                    className="w-full sm:w-72 px-4 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none focus:border-emerald-400/40"
+                  />
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">⌘K</div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    value={sort}
+                    onChange={(e) => setSort(e.target.value as SortKey)}
+                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
+                  >
+                    <option value="score">Sort: Highest score</option>
+                    <option value="newest">Sort: Newest</option>
+                    <option value="ret5d">Sort: Best +5D</option>
+                  </select>
+
+                  <select
+                    value={minScore}
+                    onChange={(e) => setMinScore(Number(e.target.value))}
+                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
+                  >
+                    <option value={50}>Score ≥ 50</option>
+                    <option value={60}>Score ≥ 60</option>
+                    <option value={70}>Score ≥ 70</option>
+                    <option value={80}>Score ≥ 80</option>
+                  </select>
+
+                  <select
+                    value={limit}
+                    onChange={(e) => setLimit(Number(e.target.value))}
+                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
+                  >
+                    <option value={20}>Top 20</option>
+                    <option value={30}>Top 30</option>
+                    <option value={50}>Top 50</option>
+                    <option value={100}>Top 100</option>
+                  </select>
+
+                  <select
+                    value={perPage}
+                    onChange={(e) => setPerPage(Number(e.target.value))}
+                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
+                  >
+                    <option value={10}>Cards: 10</option>
+                    <option value={20}>Cards: 20</option>
+                    <option value={30}>Cards: 30</option>
+                    <option value={50}>Cards: 50</option>
+                  </select>
+
+                  <div className="flex rounded-2xl overflow-hidden border border-white/10 bg-slate-900/70">
+                    <button
+                      onClick={() => setView('grid')}
+                      className={`px-3 py-2.5 text-sm font-black ${view === 'grid' ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                    >
+                      Grid
+                    </button>
+                    <button
+                      onClick={() => setView('list')}
+                      className={`px-3 py-2.5 text-sm font-black ${view === 'list' ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                    >
+                      List
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Content */}
+            <div className="p-5 md:p-6">
+              {loading && (
+                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <SkeletonCard key={i} />
+                  ))}
+                </div>
+              )}
+
+              {!loading && err && (
+                <div className="rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-200 p-4">
+                  <div className="font-black">API error</div>
+                  <div className="text-sm mt-1">{err}</div>
+                </div>
+              )}
+
+              {!loading && !err && filtered.length === 0 && (
+                <div className="py-10 text-center text-slate-300">
+                  No items found. Try lowering the score filter.
+                </div>
+              )}
+
+              {!loading && !err && filtered.length > 0 && (
+                <>
+                  {view === 'grid' ? (
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {paged.map((it, idx) => {
+                        const tone = scoreTone(it.score);
+                        const pi = pricedInUI(it.pricedIn ?? null);
+                        const isTop = idx === 0 && sort === 'score' && !q;
+
+                        return (
+                          <div
+                            key={`${it.symbol}-${it.publishedAt}-${idx}`}
+                            className={`group rounded-3xl bg-white/5 border border-white/10 shadow-xl p-5 transition transform hover:-translate-y-0.5 hover:bg-white/[0.07] hover:border-emerald-400/25 ring-1 ${tone.ring}`}
+                          >
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex flex-col">
+                                <div className="text-[11px] font-black tracking-wider text-emerald-200/90">
+                                  {isTop ? '🏆 TOP IMPACT' : impactLabel(it.score)}
+                                </div>
+                                <Link
+                                  href={`/ticker/${encodeURIComponent(it.symbol)}`}
+                                  className="mt-1 text-2xl font-black text-white group-hover:text-emerald-200 transition"
+                                >
+                                  {it.symbol}
+                                </Link>
+                              </div>
+
+                              <div className={`inline-flex items-center px-3 py-1.5 rounded-2xl border text-sm font-black ${tone.pill}`}>
+                                {it.score}
+                              </div>
+                            </div>
+
+                            <div className="mt-3 text-slate-200/90 font-semibold leading-snug line-clamp-3">
+                              {it.headline}
+                            </div>
+
+                            <div className="mt-2 text-[11px] text-slate-400">
+                              {fmtDate(it.publishedAt)}
+                              {it.type ? <span className="mx-2">•</span> : null}
+                              {it.type ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
+                                  {it.type}
+                                </span>
+                              ) : null}
+                            </div>
+
+                            {/* impact bar */}
+                            <div className="mt-4">
+                              <div className="h-2 w-full bg-slate-900/60 rounded-full overflow-hidden border border-white/10">
+                                <div
+                                  className="h-2 rounded-full bg-gradient-to-r from-emerald-400 via-cyan-400 to-indigo-400"
+                                  style={{ width: `${impactBarWidth(it.score)}%` }}
+                                />
+                              </div>
+                              <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
+                                <span>Impact confidence</span>
+                                <span>{impactBarWidth(it.score)}%</span>
+                              </div>
+                            </div>
+
+                            {/* priced-in */}
+                            <div className="mt-4">
+                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${pi.cls}`}>
+                                {pi.txt}
+                              </span>
+                            </div>
+
+                            {/* returns */}
+                            <div className="mt-4 flex flex-wrap gap-2">
+                              <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.ret1d)}`}>
+                                +1D {fmtPct(it.ret1d)}
+                              </span>
+                              <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.ret5d)}`}>
+                                +5D {fmtPct(it.ret5d)}
+                              </span>
+                              {typeof it.retPre5 === 'number' ? (
+                                <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.retPre5)}`}>
+                                  Pre-5 {fmtPct(it.retPre5)}
+                                </span>
+                              ) : null}
+                            </div>
+
+                            {/* actions */}
+                            <div className="mt-5 flex items-center justify-between">
+                              <Link
+                                href={`/ticker/${encodeURIComponent(it.symbol)}`}
+                                className="text-sm font-black text-emerald-200 hover:underline"
+                              >
+                                Open ticker →
+                              </Link>
+
+                              {it.url ? (
+                                <a
+                                  href={it.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm font-bold text-slate-300 hover:text-white hover:underline"
+                                >
+                                  Source ↗
+                                </a>
+                              ) : (
+                                <span className="text-sm text-slate-500">No source</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-white/10 overflow-hidden">
+                      <div className="grid grid-cols-12 gap-2 px-4 py-3 text-[11px] font-black text-slate-300 bg-white/5">
+                        <div className="col-span-2">Ticker</div>
+                        <div className="col-span-6">Headline</div>
+                        <div className="col-span-1 text-right">Score</div>
+                        <div className="col-span-1 text-right">+1D</div>
+                        <div className="col-span-1 text-right">+5D</div>
+                        <div className="col-span-1 text-right">Link</div>
+                      </div>
+
+                      {paged.map((it, idx) => {
+                        const tone = scoreTone(it.score);
+                        return (
+                          <div
+                            key={`${it.symbol}-${it.publishedAt}-${idx}`}
+                            className="grid grid-cols-12 gap-2 px-4 py-4 border-t border-white/5 hover:bg-white/[0.04] transition"
+                          >
+                            <div className="col-span-2">
+                              <Link
+                                href={`/ticker/${encodeURIComponent(it.symbol)}`}
+                                className="font-black text-emerald-200 hover:underline"
+                              >
+                                {it.symbol}
+                              </Link>
+                              <div className="text-[11px] text-slate-400 mt-1">{fmtDate(it.publishedAt)}</div>
+                            </div>
+
+                            <div className="col-span-6">
+                              <div className="font-semibold text-slate-100">{it.headline}</div>
+                              <div className="mt-1 flex flex-wrap gap-2 items-center text-[11px] text-slate-400">
+                                {it.type ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
+                                    {it.type}
+                                  </span>
+                                ) : null}
+                                <span className={`px-2 py-0.5 rounded-full border ${pricedInUI(it.pricedIn ?? null).cls}`}>
+                                  {pricedInUI(it.pricedIn ?? null).txt}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="col-span-1 text-right">
+                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${tone.pill}`}>
+                                {it.score}
+                              </span>
+                            </div>
+
+                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret1d)}`}>{fmtPct(it.ret1d)}</div>
+                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret5d)}`}>{fmtPct(it.ret5d)}</div>
+
+                            <div className="col-span-1 text-right">
+                              {it.url ? (
+                                <a href={it.url} target="_blank" rel="noreferrer" className="text-slate-300 hover:underline">
+                                  ↗
+                                </a>
+                              ) : (
+                                <span className="text-slate-600">—</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
-                </Link>
-              ))}
+
+                  {/* footer note */}
+                  <div className="mt-6 rounded-2xl bg-slate-900/40 border border-white/10 p-4">
+                    <div className="font-black">How is the score calculated?</div>
+                    <div className="text-sm text-slate-300 mt-1">
+                      We use post-news returns (+1D/+5D) and reduce the score if price moved strongly <em>before</em> the news (priced-in penalty).
+                      This is an informational ranking — not financial advice.
+                    </div>
+                  </div>
+
+                  <div className="mt-6 text-[11px] text-slate-400">
+                    Showing <b>{paged.length}</b> of <b>{filtered.length}</b> filtered items.
+                  </div>
+                </>
+              )}
             </div>
-          )}
-
-          {/* TABLE */}
-          <div className="px-5 pb-6">
-            {loading && <div className="py-10 text-center text-slate-300">Loading…</div>}
-            {!loading && err && <div className="py-6 text-red-300">{err}</div>}
-            {!loading && !err && filtered.length === 0 && (
-              <div className="py-10 text-center">
-                <div className="text-lg font-black">No results</div>
-                <div className="text-slate-400 mt-2">Try lowering the score or changing sort.</div>
-              </div>
-            )}
-
-            {!loading && !err && filtered.length > 0 && (
-              <table className="w-full text-sm">
-                <thead className="text-slate-400 border-b border-white/10">
-                  <tr>
-                    <th className="text-left py-2">#</th>
-                    <th className="text-left py-2">Ticker</th>
-                    <th className="text-left py-2">Headline</th>
-                    <th className="text-left py-2">Score</th>
-                    <th className="text-left py-2">+1D</th>
-                    <th className="text-left py-2">+5D</th>
-                    <th className="text-left py-2">Published</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((it, i) => (
-                    <tr key={`${it.symbol}-${it.publishedAt}-${i}`} className="border-b border-white/5">
-                      <td className="py-2">{i + 1}</td>
-                      <td className="py-2">
-                        <Link href={`/ticker/${it.symbol}`} className="text-emerald-300 font-black hover:underline">
-                          {it.symbol}
-                        </Link>
-                      </td>
-                      <td className="py-2">{it.headline}</td>
-                      <td className="py-2">
-                        <span className={`px-2 py-1 rounded-full border ${scoreBadge(it.score)}`}>{it.score}</span>
-                      </td>
-                      <td className="py-2">{fmtPct(it.ret1d)}</td>
-                      <td className="py-2">{fmtPct(it.ret5d)}</td>
-                      <td className="py-2 text-slate-400">{new Date(it.publishedAt).toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
           </div>
 
-          {/* FOOTER NOTE */}
-          <div className="px-5 pb-5 text-xs text-slate-500">
-            Tip: If you always see the same tickers, switch Sort to “Newest first” or lower Score.
+          <div className="text-[11px] text-slate-500 mt-6">
+            Disclaimer: Not financial advice. Scores are informational and based on historical reactions.
           </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-/* ================= COMPONENTS ================= */
-function Stat({ label, value, accent }: { label: string; value: any; accent?: boolean }) {
-  return (
-    <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
-      <div className="text-xs text-slate-400">{label}</div>
-      <div className={`text-2xl font-black ${accent ? 'text-emerald-300' : ''}`}>{value}</div>
+        </section>
+      </div>
     </div>
   );
 }

@@ -5,19 +5,19 @@ export const maxDuration = 60;
 
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
-// 🔥 HAVUZ (Taranacak Hisseler)
+// 🔥 HAVUZ
 const ALL_SYMBOLS = [
-  "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
-  "AMD", "AVGO", "INTC", "QCOM", "TXN", "MU", "NFLX", "ADBE", 
-  "CRM", "PLTR", "COIN", "MSTR", "UBER", "SHOP", "PYPL"
+  "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA",
+  "AMD","AVGO","INTC","QCOM","TXN","MU","NFLX","ADBE",
+  "CRM","PLTR","COIN","MSTR","UBER","SHOP","PYPL",
 ];
 
-// --- KELİME ANALİZİ (BASİT NLP) ---
-// Haberin içeriğine göre puan tahmini yapmak için
-const BULLISH_KEYWORDS = ["beat", "record", "jump", "soar", "surge", "approve", "launch", "partnership", "buyback", "dividen", "upgrade", "growth", "high"];
-const BEARISH_KEYWORDS = ["miss", "fail", "drop", "fall", "plunge", "sue", "lawsuit", "investigation", "downgrade", "cut", "weak", "loss", "ban"];
+const BATCH_SIZE = 15;         // her requestte kaç sembol taransın
+const PER_SYMBOL = 2;          // her sembolden kaç haber alalım
+const DELAY_MS = 120;          // rate limit koruma
 
-const BATCH_SIZE = 15; // Hız için biraz düşürdük
+const BULLISH = ["beat","record","jump","soar","surge","approve","launch","partnership","buyback","dividend","upgrade","growth","high","raises","strong"];
+const BEARISH = ["miss","fail","drop","fall","plunge","sue","lawsuit","investigation","downgrade","cut","weak","loss","ban","warning","delay"];
 
 type LeaderItem = {
   symbol: string;
@@ -25,133 +25,159 @@ type LeaderItem = {
   type: string | null;
   publishedAt: string;
   url: string | null;
+
   retPre5: number | null;
   ret1d: number | null;
   ret5d: number | null;
   pricedIn: boolean | null;
-  expectedImpact: number;
-  realizedImpact: number;
-  score: number;
-  confidence: number;
-  tooEarly: boolean;
+
+  expectedImpact: number;   // NLP tahmini
+  realizedImpact: number;   // fiyat tepkisi varsa gerçek
+  score: number;            // listede sıralama: realized varsa realized, yoksa expected
+  confidence: number;       // 0..100
+  tooEarly: boolean;        // realized veri yok demek
 };
 
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
-// --- 🔥 AKILLI SKORLAMA MOTORU ---
-function calculateSmartScore(
-  headline: string,
-  retPre5: number | null, // Haber öncesi 5 günlük hareket
-  ret1d: number | null,   // Haber sonrası 1 günlük (Varsa)
-  ret5d: number | null    // Haber sonrası 5 günlük (Varsa)
-) {
-  const text = headline.toLowerCase();
-  
-  // 1. GERÇEKLEŞEN ETKİ (Eğer tarih eskiyse ve veri varsa bunu kullanırız)
-  if (ret5d !== null || ret1d !== null) {
-    const rUsed = ret5d ?? ret1d ?? 0;
-    const realizedBase = clamp(Math.round(Math.abs(rUsed) * 1000), 0, 50);
-    
-    // Priced-in Cezası
-    let penalty = 0;
-    let isPricedIn = false;
-    
-    // Eğer hisse haberden önce çok yükseldiyse ve haber sonrası hareket zayıfsa -> Priced In
-    if (typeof retPre5 === "number" && Math.abs(retPre5) > 0.05 && Math.abs(rUsed) < Math.abs(retPre5) * 0.5) {
-      isPricedIn = true;
-      penalty = 20; // Puan kır
-    }
-
-    const score = clamp(50 + realizedBase - penalty, 40, 100);
-    return { score, pricedIn: isPricedIn, confidence: ret5d ? 90 : 60, tooEarly: false };
-  }
-
-  // 2. TAHMİNİ ETKİ (Eğer haber BUGÜN çıktıysa veri yoktur, biz tahmin ederiz)
-  // Burası senin istediğin "Daha önce fiyatlanmış mı?" mantığı.
-  
-  let baseScore = 50;
-  let confidence = 30; // Tahmin olduğu için güven düşük başlar
-  let isPricedIn = false;
-
-  // A) Kelime Analizi (Sentiment)
-  let sentimentScore = 0;
-  BULLISH_KEYWORDS.forEach(w => { if(text.includes(w)) sentimentScore += 15; });
-  BEARISH_KEYWORDS.forEach(w => { if(text.includes(w)) sentimentScore -= 15; });
-  
-  // Sentiment sınırla (-20 ile +20 arası)
-  sentimentScore = clamp(sentimentScore, -20, 20);
-  baseScore += sentimentScore;
-
-  // B) Fiyatlanma Analizi (THE LOGIC YOU ASKED FOR)
-  if (typeof retPre5 === "number") {
-    // Senaryo 1: Haber İYİ ama hisse zaten %5+ YÜKSELMİŞ (Buy the rumor, sell the news)
-    if (sentimentScore > 0 && retPre5 > 0.05) {
-      baseScore -= 25; // 🔥 Cezayı bas! Skor 50'nin altına iner.
-      isPricedIn = true;
-      confidence += 20; // Analizimize güvenimiz artar
-    }
-    
-    // Senaryo 2: Haber KÖTÜ ama hisse zaten %5+ DÜŞMÜŞ (Oversold)
-    else if (sentimentScore < 0 && retPre5 < -0.05) {
-      baseScore += 15; // Tepki alımı gelebilir, puanı çok düşürme
-      isPricedIn = true;
-    }
-    
-    // Senaryo 3: Haber İYİ ve hisse DÜŞMÜŞ veya YATAY (Sürpriz Etkisi!)
-    else if (sentimentScore > 0 && retPre5 <= 0.02) {
-      baseScore += 15; // 🔥 Fırlama ihtimali yüksek!
-    }
-  }
-
-  return {
-    score: clamp(baseScore, 30, 95), // 30 ile 95 arası puan ver
-    pricedIn: isPricedIn,
-    confidence, // Tahmin güvenilirliği
-    tooEarly: true // Veri yok, bu bir tahmin
-  };
-}
-
-// Fisher-Yates Shuffle
-function shuffleArray(array: string[]) {
-  const arr = [...array];
-  for (let i = arr.length - 1; i > 0; i--) {
+function shuffle<T>(arr: T[]) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  return arr;
+  return a;
 }
 
 async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// --- TIME HELPERS (KRİTİK) ---
+// unix (sec) -> YYYY-MM-DD (UTC)
+function dayKeyFromUnixSec(sec: number) {
+  const d = new Date(sec * 1000);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// candles.t (sec) -> dayKey map
+function buildDayIndex(tArr: number[]) {
+  const map = new Map<string, number>();
+  for (let i = 0; i < tArr.length; i++) {
+    const k = dayKeyFromUnixSec(tArr[i]);
+    // aynı güne birden çok entry olursa ilkini tut (genelde zaten 1)
+    if (!map.has(k)) map.set(k, i);
+  }
+  return map;
+}
+
+function pct(x: number | null) {
+  if (typeof x !== "number") return null;
+  return x;
+}
+
+// --- REALIZED IMPACT (price) ---
+function realizedFromReturns(ret5d: number | null, ret1d: number | null, retPre5: number | null) {
+  const rUsed = ret5d ?? ret1d;
+  if (rUsed == null) {
+    return {
+      realizedImpact: 50,
+      pricedIn: null as boolean | null,
+      tooEarly: true,
+      confidence: 25,
+    };
+  }
+
+  const base = clamp(Math.round(Math.abs(rUsed) * 1000), 0, 50);
+  let pricedIn: boolean | null = null;
+
+  if (typeof retPre5 === "number" && Math.abs(rUsed) > 0.005) {
+    pricedIn = Math.abs(retPre5) > Math.abs(rUsed) * 0.9;
+  }
+
+  let pen = 0;
+  if (pricedIn === true && typeof retPre5 === "number") {
+    pen = clamp(Math.round((Math.abs(retPre5) - Math.abs(rUsed)) * 1200), 0, 25);
+  }
+
+  const realizedImpact = clamp(50 + base - pen, 40, 100);
+
+  let conf = 40;
+  if (ret1d != null) conf += 20;
+  if (ret5d != null) conf += 35;
+  if (pricedIn != null) conf += 5;
+
+  return {
+    realizedImpact,
+    pricedIn,
+    tooEarly: false,
+    confidence: clamp(conf, 0, 100),
+  };
+}
+
+// --- EXPECTED IMPACT (headline NLP) ---
+function expectedFromHeadline(headline: string, retPre5: number | null) {
+  const text = headline.toLowerCase();
+
+  // küçük ağırlıklar: daha stabil
+  let senti = 0;
+  for (const w of BULLISH) if (text.includes(w)) senti += 6;
+  for (const w of BEARISH) if (text.includes(w)) senti -= 6;
+  senti = clamp(senti, -18, 18);
+
+  let expected = 55 + senti; // 55 taban: “haber var” diye hafif yukarı
+  let pricedIn = false;
+
+  // priced-in tahmini: haber iyi + önceden güçlü yükseliş => puanı kır
+  if (typeof retPre5 === "number") {
+    if (senti > 6 && retPre5 > 0.05) { expected -= 18; pricedIn = true; }
+    if (senti < -6 && retPre5 < -0.05) { expected += 10; pricedIn = true; }
+    if (senti > 6 && retPre5 <= 0.02) { expected += 10; }
+  }
+
+  expected = clamp(expected, 35, 95);
+
+  // NLP güveni: düşük başlayacak
+  let conf = 30;
+  if (Math.abs(senti) >= 12) conf += 10; // güçlü kelime sinyali
+
+  // retPre5 varsa tahmin daha anlamlı
+  if (typeof retPre5 === "number") conf += 15;
+
+  return {
+    expectedImpact: expected,
+    pricedInGuess: pricedIn,
+    confidenceGuess: clamp(conf, 0, 60),
+  };
+}
+
 async function fetchCandles(symbol: string, fromUnix: number, toUnix: number) {
   try {
-    const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(
-      symbol
-    )}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
+    const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json();
     if (data?.s !== "ok") return null;
     return { t: data.t as number[], c: data.c as number[] };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 async function fetchSymbolItems(symbol: string, perSymbol: number): Promise<LeaderItem[]> {
   const now = new Date();
-  
-  // 🔥 HEM BUGÜNÜ HEM GEÇMİŞİ KAPSAYAN TARİH
-  // Son 30 günün haberlerini alıyoruz.
-  const fromDate = new Date(now.getTime() - 30 * 24 * 3600 * 1000); 
-  
+  const fromDate = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+
   const toUnix = Math.floor(now.getTime() / 1000);
-  const fromUnix = Math.floor(toUnix - 90 * 24 * 3600); 
+  const fromUnix = Math.floor(toUnix - 140 * 24 * 3600);
 
   const items: LeaderItem[] = [];
 
   const newsRes = await fetch(
-    `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromDate.toISOString().slice(0, 10)}&to=${now.toISOString().slice(0, 10)}&token=${FINNHUB_API_KEY}`,
+    `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromDate.toISOString().slice(0,10)}&to=${now.toISOString().slice(0,10)}&token=${FINNHUB_API_KEY}`,
     { cache: "no-store" }
   );
 
@@ -160,34 +186,53 @@ async function fetchSymbolItems(symbol: string, perSymbol: number): Promise<Lead
   if (!Array.isArray(news) || news.length === 0) return items;
 
   const candles = await fetchCandles(symbol, fromUnix, toUnix);
+  const dayIdx = candles ? buildDayIndex(candles.t) : null;
+
   const seen = new Set<string>();
 
   for (const n of news) {
     if (!n?.headline || !n?.datetime) continue;
-    const key = `${symbol}|${n.datetime}|${n.headline}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+
+    // dedupe (aynı sembolde aynı başlık aynı gün)
+    const k = `${symbol}|${dayKeyFromUnixSec(n.datetime)}|${n.headline.trim().toLowerCase()}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
 
     let ret1d: number | null = null;
     let ret5d: number | null = null;
     let retPre5: number | null = null;
 
-    if (candles) {
-      const idx = candles.t.findIndex((t) => t >= n.datetime);
-      if (idx !== -1) { // Candle bulunduysa (Gelecek veri olmasa bile geçmiş veri olabilir)
-        const base = candles.c[idx]; // Haber günü kapanışı
-        
-        // Gelecek Verisi (Varsa)
+    if (candles && dayIdx) {
+      const dk = dayKeyFromUnixSec(n.datetime);
+      const idx = dayIdx.get(dk);
+
+      if (typeof idx === "number") {
+        const base = candles.c[idx];
+
         if (idx + 1 < candles.c.length) ret1d = (candles.c[idx + 1] - base) / base;
         if (idx + 5 < candles.c.length) ret5d = (candles.c[idx + 5] - base) / base;
-        
-        // Geçmiş Verisi (Priced-in hesabı için ŞART)
         if (idx - 5 >= 0) retPre5 = (base - candles.c[idx - 5]) / candles.c[idx - 5];
       }
     }
 
-    // 🔥 YENİ HESAPLAMA MOTORU
-    const analysis = calculateSmartScore(n.headline, retPre5, ret1d, ret5d);
+    // Expected (headline) her zaman var
+    const exp = expectedFromHeadline(n.headline, pct(retPre5));
+
+    // Realized (price) varsa üstün gelecek
+    const real = realizedFromReturns(pct(ret5d), pct(ret1d), pct(retPre5));
+
+    const tooEarly = real.tooEarly;
+
+    // score: realized varsa onu kullan, yoksa expected
+    const score = tooEarly ? exp.expectedImpact : real.realizedImpact;
+
+    // pricedIn: realized varsa onu, yoksa tahmini
+    const pricedIn = tooEarly ? exp.pricedInGuess : real.pricedIn;
+
+    // confidence: realized varsa yüksek, yoksa düşük
+    const confidence = tooEarly
+      ? exp.confidenceGuess
+      : real.confidence;
 
     items.push({
       symbol,
@@ -195,51 +240,68 @@ async function fetchSymbolItems(symbol: string, perSymbol: number): Promise<Lead
       type: n.category ?? null,
       publishedAt: new Date(n.datetime * 1000).toISOString(),
       url: n.url ?? null,
+
       retPre5,
       ret1d,
       ret5d,
-      ...analysis, // score, pricedIn, confidence, tooEarly buradan geliyor
-      expectedImpact: analysis.score,
-      realizedImpact: analysis.score
+
+      pricedIn,
+      expectedImpact: exp.expectedImpact,
+      realizedImpact: real.realizedImpact,
+      score,
+      confidence,
+      tooEarly,
     });
 
     if (items.length >= perSymbol) break;
   }
+
   return items;
 }
 
 export async function GET(req: Request) {
   try {
-    if (!FINNHUB_API_KEY) return NextResponse.json({ error: "No API Key", items: [] }, { status: 500 });
+    if (!FINNHUB_API_KEY) {
+      return NextResponse.json({ error: "FINNHUB_API_KEY missing", asOf: new Date().toISOString(), items: [] }, { status: 500 });
+    }
 
     const { searchParams } = new URL(req.url);
-    const min = parseInt(searchParams.get("min") || "30", 10); // Filtreyi 30'a çektim ki düşenleri de gör
-    const limit = parseInt(searchParams.get("limit") || "50", 10);
-    const perSymbol = parseInt(searchParams.get("perSymbol") || "2", 10);
+    const min = clamp(parseInt(searchParams.get("min") || "30", 10), 0, 100);
+    const limit = clamp(parseInt(searchParams.get("limit") || "50", 10), 1, 200);
+    const perSymbol = clamp(parseInt(searchParams.get("perSymbol") || String(PER_SYMBOL), 10), 1, 5);
 
-    const shuffledSymbols = shuffleArray(ALL_SYMBOLS).slice(0, BATCH_SIZE);
-    
+    // her requestte farklı semboller taransın (havuzdan)
+    const symbols = shuffle(ALL_SYMBOLS).slice(0, BATCH_SIZE);
+
     const all: LeaderItem[] = [];
     const globalSeen = new Set<string>();
 
-    for (const sym of shuffledSymbols) {
+    for (const sym of symbols) {
       const items = await fetchSymbolItems(sym, perSymbol);
+
       for (const it of items) {
-        const k = `${it.symbol}|${it.headline.trim().toLowerCase()}`;
-        if (globalSeen.has(k)) continue;
-        globalSeen.add(k);
+        // global dedupe (aynı başlık farklı sembolde de çıkabiliyor, ama burada sembol dahil kalsın)
+        const gk = `${it.symbol}|${it.publishedAt.slice(0,10)}|${it.headline.trim().toLowerCase()}`;
+        if (globalSeen.has(gk)) continue;
+        globalSeen.add(gk);
         all.push(it);
       }
-      await sleep(100);
+
+      await sleep(DELAY_MS);
     }
 
     const filtered = all
       .filter((x) => x.score >= min)
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => {
+        // önce score, sonra confidence, sonra tarih
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+        return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+      })
       .slice(0, limit);
 
     return NextResponse.json({ asOf: new Date().toISOString(), items: filtered }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json({ error: e.message, items: [] }, { status: 500 });
+    return NextResponse.json({ error: e?.message || "Unknown error", asOf: new Date().toISOString(), items: [] }, { status: 500 });
   }
 }

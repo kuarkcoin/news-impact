@@ -3,584 +3,415 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 
-type LeaderboardItem = {
+type LeaderItem = {
   symbol: string;
   headline: string;
-  type?: string | null;
-  publishedAt: string; // ISO
-  score: number; // 50..100
-  pricedIn?: boolean | null;
-  retPre5?: number | null;
-  ret1d?: number | null;
-  ret5d?: number | null;
-  url?: string | null;
+  type: string | null;
+  publishedAt: string;
+  url: string | null;
+
+  retPre5: number | null;
+  ret1d: number | null;
+  ret5d: number | null;
+
+  pricedIn: boolean | null;
+
+  expectedImpact: number;  // 50..100
+  realizedImpact: number;  // 50..100
+  score: number;           // 50..100 (sen score=expectedImpact dönüyorsun)
+  confidence: number;      // 0..100
+  tooEarly: boolean;       // true => ⚠️
 };
 
-type LeaderboardResponse = {
-  asOf: string;
-  range?: { min: number; max: number };
-  items: LeaderboardItem[];
-};
-
-function clampInt(n: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, n));
-}
-
-function fmtDate(iso: string) {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString();
-  } catch {
-    return iso;
-  }
-}
+type ApiResp = { asOf: string; items: LeaderItem[] };
 
 function fmtPct(x: number | null | undefined) {
-  if (typeof x !== 'number' || Number.isNaN(x)) return '—';
+  if (typeof x !== 'number') return '—';
   const v = x * 100;
   const sign = v > 0 ? '+' : '';
   return `${sign}${v.toFixed(2)}%`;
 }
 
-function pctColor(x: number | null | undefined) {
-  if (typeof x !== 'number') return 'text-slate-300';
-  if (x > 0.001) return 'text-emerald-300';
-  if (x < -0.001) return 'text-rose-300';
-  return 'text-slate-300';
+function badgeScore(score: number) {
+  if (score >= 85) return 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25';
+  if (score >= 70) return 'bg-amber-500/10 text-amber-300 border-amber-500/25';
+  return 'bg-slate-500/10 text-slate-300 border-white/10';
 }
 
-function scoreTone(score: number) {
-  if (score >= 85) return { pill: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25', ring: 'ring-emerald-400/30' };
-  if (score >= 70) return { pill: 'bg-cyan-400/15 text-cyan-200 border-cyan-400/25', ring: 'ring-cyan-400/30' };
-  if (score >= 60) return { pill: 'bg-amber-400/15 text-amber-200 border-amber-400/25', ring: 'ring-amber-400/30' };
-  return { pill: 'bg-slate-400/10 text-slate-200 border-white/10', ring: 'ring-white/10' };
+function badgeType(t: string | null) {
+  const s = (t || 'General').toLowerCase();
+  if (s.includes('earn')) return 'bg-fuchsia-500/10 text-fuchsia-200 border-fuchsia-500/20';
+  if (s.includes('analyst')) return 'bg-sky-500/10 text-sky-200 border-sky-500/20';
+  if (s.includes('product')) return 'bg-violet-500/10 text-violet-200 border-violet-500/20';
+  return 'bg-white/5 text-slate-200 border-white/10';
 }
 
-function pricedInUI(v: boolean | null | undefined) {
-  if (v === false) return { txt: '🔥 Not priced-in', cls: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25' };
-  if (v === true) return { txt: '⚠️ Mostly priced-in', cls: 'bg-amber-400/15 text-amber-200 border-amber-400/25' };
-  return { txt: '— Unclear', cls: 'bg-white/5 text-slate-200 border-white/10' };
+function pricedInText(v: boolean | null | undefined) {
+  if (v === true) return { txt: '✅ Priced-in', cls: 'bg-white/5 text-slate-200 border-white/10' };
+  if (v === false) return { txt: '🔥 Not priced', cls: 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20' };
+  return { txt: '—', cls: 'bg-white/5 text-slate-200 border-white/10' };
 }
 
-function impactLabel(score: number) {
-  if (score >= 85) return 'TOP IMPACT';
-  if (score >= 70) return 'HIGH IMPACT';
-  if (score >= 60) return 'MED IMPACT';
-  return 'LOW IMPACT';
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
 }
-
-function impactBarWidth(score: number) {
-  // 50..100 -> 0..100 gibi göstermek daha dramatik
-  const w = (score - 50) * 2;
-  return clampInt(w, 0, 100);
-}
-
-function SkeletonCard() {
-  return (
-    <div className="rounded-3xl bg-white/5 border border-white/10 p-5 animate-pulse">
-      <div className="flex items-start justify-between gap-4">
-        <div className="h-5 w-24 bg-white/10 rounded-lg" />
-        <div className="h-8 w-12 bg-white/10 rounded-2xl" />
-      </div>
-      <div className="mt-4 h-8 w-20 bg-white/10 rounded-xl" />
-      <div className="mt-3 h-4 w-full bg-white/10 rounded-lg" />
-      <div className="mt-2 h-4 w-4/5 bg-white/10 rounded-lg" />
-      <div className="mt-5 h-2 w-full bg-white/10 rounded-full" />
-      <div className="mt-4 flex gap-2">
-        <div className="h-7 w-24 bg-white/10 rounded-full" />
-        <div className="h-7 w-24 bg-white/10 rounded-full" />
-      </div>
-    </div>
-  );
-}
-
-type SortKey = 'score' | 'newest' | 'ret5d';
 
 export default function HomePage() {
-  const [data, setData] = useState<LeaderboardResponse | null>(null);
+  const [data, setData] = useState<ApiResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  const [minScore, setMinScore] = useState(50);
-  const [limit, setLimit] = useState(30);
   const [q, setQ] = useState('');
-  const [sort, setSort] = useState<SortKey>('score');
-  const [view, setView] = useState<'grid' | 'list'>('grid');
-  const [perPage, setPerPage] = useState(10);
+  const [minScore, setMinScore] = useState(50);
+  const [sortBy, setSortBy] = useState<'score' | 'newest' | 'confidence'>('score');
 
   useEffect(() => {
     let alive = true;
-
     (async () => {
       try {
         setLoading(true);
         setErr(null);
-
-        const res = await fetch(`/api/leaderboard?min=${minScore}&limit=${limit}`, {
-          cache: 'no-store',
-        });
-
-        const json = (await res.json().catch(() => ({}))) as any;
-        if (!res.ok) throw new Error(json?.error || `API error: ${res.status}`);
-
-        if (alive) setData(json as LeaderboardResponse);
+        const res = await fetch(`/api/leaderboard?min=${minScore}&limit=50`, { cache: 'no-store' });
+        const json = (await res.json().catch(() => null)) as ApiResp | null;
+        if (!res.ok || !json) throw new Error('API error');
+        if (alive) setData(json);
       } catch (e: any) {
         if (alive) setErr(e?.message || 'Unknown error');
       } finally {
         if (alive) setLoading(false);
       }
     })();
+    return () => { alive = false; };
+  }, [minScore]);
 
-    return () => {
-      alive = false;
-    };
-  }, [minScore, limit]);
-
-  const items = useMemo(() => data?.items || [], [data]);
-
-  const stats = useMemo(() => {
-    const n = items.length;
-    const top = items[0]?.score ?? null;
-    const avg = n ? items.reduce((a, b) => a + (b.score || 0), 0) / n : null;
-    const priced = n ? items.filter((x) => x.pricedIn === true).length : 0;
-    return {
-      n,
-      top,
-      avg,
-      priced,
-    };
-  }, [items]);
-
-  const filtered = useMemo(() => {
+  const items = useMemo(() => {
+    const list = data?.items || [];
     const qq = q.trim().toLowerCase();
-    let arr = items;
 
-    if (qq) {
-      arr = arr.filter((it) => {
-        const a = (it.symbol || '').toLowerCase();
-        const b = (it.headline || '').toLowerCase();
-        const c = (it.type || '').toLowerCase();
-        return a.includes(qq) || b.includes(qq) || c.includes(qq);
-      });
-    }
+    const searched = !qq
+      ? list
+      : list.filter((it) => {
+          const blob = `${it.symbol} ${it.headline} ${it.type || ''}`.toLowerCase();
+          return blob.includes(qq);
+        });
 
-    arr = [...arr].sort((a, b) => {
-      if (sort === 'newest') {
-        return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
-      }
-      if (sort === 'ret5d') {
-        const aa = typeof a.ret5d === 'number' ? a.ret5d : -999;
-        const bb = typeof b.ret5d === 'number' ? b.ret5d : -999;
-        return bb - aa;
-      }
-      return (b.score || 0) - (a.score || 0);
+    const sorted = [...searched].sort((a, b) => {
+      if (sortBy === 'newest') return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+      if (sortBy === 'confidence') return (b.confidence ?? 0) - (a.confidence ?? 0);
+      return (b.score ?? 0) - (a.score ?? 0);
     });
 
-    return arr;
-  }, [items, q, sort]);
+    return sorted;
+  }, [data, q, sortBy]);
 
-  // pagination-like (client-side simple)
-  const paged = useMemo(() => filtered.slice(0, perPage), [filtered, perPage]);
+  const top3 = items.slice(0, 3);
+
+  const stats = useMemo(() => {
+    const list = data?.items || [];
+    const avgScore = list.length ? Math.round(list.reduce((a, x) => a + (x.score ?? 0), 0) / list.length) : 0;
+    const hi = list.filter((x) => (x.score ?? 0) >= 80).length;
+    const early = list.filter((x) => x.tooEarly).length;
+    return { total: list.length, avgScore, hi, early };
+  }, [data]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
-      {/* Background glow */}
-      <div className="pointer-events-none fixed inset-0 overflow-hidden">
-        <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-[900px] h-[900px] rounded-full bg-emerald-400/10 blur-[120px]" />
-        <div className="absolute top-[30%] -left-40 w-[500px] h-[500px] rounded-full bg-cyan-400/10 blur-[120px]" />
-        <div className="absolute bottom-[-120px] right-[-120px] w-[520px] h-[520px] rounded-full bg-indigo-400/10 blur-[120px]" />
-      </div>
+      {/* HERO */}
+      <section className="max-w-6xl mx-auto px-4 pt-10 pb-6">
+        <div className="flex flex-col gap-4">
+          <div className="inline-flex items-center gap-2 w-fit px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-200">
+            📈 NewsImpact • Nasdaq watchlist • demo scoring
+          </div>
 
-      <div className="relative">
-        {/* Top bar */}
-        <header className="w-full max-w-6xl mx-auto px-4 pt-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-10 h-10 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center font-black">
-                NI
-              </div>
-              <div>
-                <div className="font-black leading-tight">NewsImpact</div>
-                <div className="text-[11px] text-slate-400 leading-tight">Nasdaq news reaction ranking</div>
-              </div>
-            </div>
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-black leading-tight">
+            News → Price Reaction <span className="text-emerald-300">measured</span>
+          </h1>
 
-            <div className="flex items-center gap-2">
-              <Link
-                href="/methodology"
-                className="hidden sm:inline-flex items-center px-3 py-2 rounded-2xl bg-white/5 border border-white/10 text-sm font-semibold hover:bg-white/10 transition"
-              >
-                Methodology
-              </Link>
+          <p className="text-slate-300 max-w-2xl">
+            Each headline gets: <b>Expected</b> vs <b>Realized</b> impact, a <b>Confidence</b> score, and a warning if it’s <b>too early</b>.
+          </p>
+
+          {/* quick stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+            <Stat label="Items" value={stats.total} />
+            <Stat label="Avg score" value={stats.total ? stats.avgScore : '—'} accent />
+            <Stat label="High impact (≥80)" value={stats.hi} />
+            <Stat label="Too early" value={stats.early} />
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3 pt-2">
+            <a
+              href="#leaderboard"
+              className="inline-flex items-center justify-center px-6 py-3 rounded-2xl bg-emerald-400 text-slate-950 font-black hover:opacity-95 transition"
+            >
+              View leaderboard →
+            </a>
+            <Link
+              href="/methodology"
+              className="inline-flex items-center justify-center px-6 py-3 rounded-2xl bg-white/5 border border-white/10 text-white font-bold hover:bg-white/10 transition"
+            >
+              How it works
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* TOP CARDS */}
+      <section className="max-w-6xl mx-auto px-4 pb-4">
+        {top3.length > 0 && (
+          <div className="grid md:grid-cols-3 gap-4">
+            {top3.map((it) => (
               <a
-                href="#leaderboard"
-                className="inline-flex items-center px-3 py-2 rounded-2xl bg-emerald-400 text-slate-950 text-sm font-black hover:opacity-95 transition"
+                key={`${it.symbol}-${it.publishedAt}`}
+                href={it.url || '#'}
+                target={it.url ? '_blank' : undefined}
+                rel="noreferrer"
+                className="group rounded-3xl bg-white/5 border border-white/10 p-5 hover:bg-white/7 transition shadow-xl"
               >
-                View Ranking →
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${badgeScore(it.score)}`}>
+                    Score {it.score}
+                  </span>
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${badgeType(it.type)}`}>
+                    {it.type || 'General'}
+                  </span>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between">
+                  <div className="text-2xl font-black text-emerald-300">{it.symbol}</div>
+                  {it.tooEarly ? (
+                    <span className="text-[11px] font-black px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-200">
+                      ⚠️ Too early to price
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className="mt-2 text-sm text-white/90 line-clamp-3">{it.headline}</div>
+
+                {/* Expected vs Realized */}
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <MiniKpi label="Expected" value={it.expectedImpact} />
+                  <MiniKpi label="Realized" value={it.realizedImpact} />
+                </div>
+
+                {/* Confidence bar */}
+                <div className="mt-4">
+                  <div className="flex items-center justify-between text-[11px] text-slate-300">
+                    <span className="font-bold">Confidence</span>
+                    <span className="font-black">{clamp(it.confidence ?? 0, 0, 100)}%</span>
+                  </div>
+                  <div className="mt-2 h-2 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-2 rounded-full bg-emerald-400"
+                      style={{ width: `${clamp(it.confidence ?? 0, 0, 100)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* returns + priced in */}
+                <div className="mt-4 flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-full border ${pricedInText(it.pricedIn).cls}`}>
+                    {pricedInText(it.pricedIn).txt}
+                  </span>
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full border bg-white/5 border-white/10 text-slate-200">
+                    +1D {fmtPct(it.ret1d)}
+                  </span>
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full border bg-white/5 border-white/10 text-slate-200">
+                    +5D {fmtPct(it.ret5d)}
+                  </span>
+                </div>
+
+                <div className="mt-4 text-[11px] text-slate-400">
+                  {new Date(it.publishedAt).toLocaleString()}
+                  <span className="opacity-60"> • </span>
+                  <span className="underline underline-offset-4 group-hover:opacity-100 opacity-80">
+                    open source →
+                  </span>
+                </div>
               </a>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* LEADERBOARD */}
+      <section id="leaderboard" className="max-w-6xl mx-auto px-4 pb-16">
+        <div className="rounded-3xl bg-white/5 border border-white/10 shadow-xl overflow-hidden">
+          {/* controls */}
+          <div className="p-5 md:p-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-xl font-black">Leaderboard</div>
+              <div className="text-xs text-slate-300 mt-1">
+                {data?.asOf ? `As of ${new Date(data.asOf).toLocaleString()}` : 'Live'}
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search: AAPL, earnings, AI..."
+                className="w-full sm:w-72 px-4 py-2 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none focus:border-emerald-400/40"
+              />
+
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="px-3 py-2 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
+              >
+                <option value="score">Sort: Score</option>
+                <option value="confidence">Sort: Confidence</option>
+                <option value="newest">Sort: Newest</option>
+              </select>
+
+              <select
+                value={minScore}
+                onChange={(e) => setMinScore(Number(e.target.value))}
+                className="px-3 py-2 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
+              >
+                <option value={50}>Score ≥ 50</option>
+                <option value={60}>Score ≥ 60</option>
+                <option value={70}>Score ≥ 70</option>
+                <option value={80}>Score ≥ 80</option>
+              </select>
             </div>
           </div>
-        </header>
 
-        {/* Hero */}
-        <section className="w-full max-w-6xl mx-auto px-4 pt-10 pb-8">
-          <div className="grid md:grid-cols-12 gap-6 items-start">
-            <div className="md:col-span-7">
-              <div className="inline-flex items-center gap-2 w-fit px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-200">
-                📈 Nasdaq-100 News Impact • Data-driven
+          {/* table */}
+          <div className="px-5 md:px-6 pb-6">
+            {loading && (
+              <div className="py-10 text-center text-slate-300">
+                <div className="inline-block w-10 h-10 border-4 border-white/10 border-t-emerald-400 rounded-full animate-spin" />
+                <div className="mt-4 text-sm font-semibold">Loading…</div>
               </div>
+            )}
 
-              <h1 className="mt-4 text-3xl sm:text-4xl md:text-5xl font-black leading-tight">
-                Rank news by <span className="text-emerald-300">real market reaction</span>.
-              </h1>
-
-              <p className="mt-4 text-slate-300 max-w-2xl">
-                We scan news events and score impact from <b>50–100</b> using post-news returns (+1D / +5D) and a
-                <b> priced-in penalty</b>. It’s a fast way to spot what’s truly moving the tape.
-              </p>
-
-              <div className="mt-5 flex flex-wrap gap-2 text-xs">
-                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">⚡ Updated frequently</span>
-                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">🧠 Priced-in detection</span>
-                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">📊 +1D / +5D returns</span>
+            {!loading && err && (
+              <div className="py-8 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-200 px-4">
+                <div className="font-black">API error</div>
+                <div className="text-sm mt-1">{err}</div>
               </div>
-            </div>
+            )}
 
-            {/* Stat card */}
-            <div className="md:col-span-5">
-              <div className="rounded-3xl bg-white/5 border border-white/10 shadow-xl p-5">
-                <div className="flex items-center justify-between">
-                  <div className="font-black">Today Snapshot</div>
-                  <div className="text-[11px] text-slate-400">{data?.asOf ? fmtDate(data.asOf) : '—'}</div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-3 gap-3">
-                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
-                    <div className="text-[11px] text-slate-400">Events</div>
-                    <div className="mt-1 text-xl font-black">{stats.n || '—'}</div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
-                    <div className="text-[11px] text-slate-400">Top score</div>
-                    <div className="mt-1 text-xl font-black">{typeof stats.top === 'number' ? stats.top : '—'}</div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
-                    <div className="text-[11px] text-slate-400">Priced-in</div>
-                    <div className="mt-1 text-xl font-black">{stats.n ? `${stats.priced}` : '—'}</div>
-                  </div>
-                </div>
-
-                <div className="mt-4 text-xs text-slate-400">
-                  Tip: Filter by <b>Score ≥ 70</b> to find higher-impact news.
-                </div>
+            {!loading && !err && items.length === 0 && (
+              <div className="py-10 text-center text-slate-300">
+                No items. Try lowering Score.
               </div>
-            </div>
-          </div>
-        </section>
+            )}
 
-        {/* Controls + Board */}
-        <section id="leaderboard" className="w-full max-w-6xl mx-auto px-4 pb-16">
-          <div className="rounded-3xl bg-white/5 border border-white/10 shadow-xl overflow-hidden">
-            {/* Control header */}
-            <div className="p-5 md:p-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between border-b border-white/10">
-              <div>
-                <div className="text-xl font-black">Top News Impact</div>
-                <div className="text-xs text-slate-400 mt-1">
-                  {data?.asOf ? `As of ${fmtDate(data.asOf)}` : 'Live ranking'}
-                </div>
-              </div>
+            {!loading && !err && items.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-slate-300">
+                    <tr className="border-b border-white/10">
+                      <th className="text-left py-3 pr-3">#</th>
+                      <th className="text-left py-3 pr-3">Ticker</th>
+                      <th className="text-left py-3 pr-3">Headline</th>
+                      <th className="text-left py-3 pr-3">Score</th>
+                      <th className="text-left py-3 pr-3">Expected</th>
+                      <th className="text-left py-3 pr-3">Realized</th>
+                      <th className="text-left py-3 pr-3">Conf</th>
+                      <th className="text-left py-3 pr-3">⚠️</th>
+                      <th className="text-left py-3 pr-3">+1D</th>
+                      <th className="text-left py-3 pr-3">+5D</th>
+                    </tr>
+                  </thead>
 
-              <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
-                <div className="relative">
-                  <input
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="Search ticker or keyword…"
-                    className="w-full sm:w-72 px-4 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none focus:border-emerald-400/40"
-                  />
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">⌘K</div>
-                </div>
+                  <tbody>
+                    {items.map((it, idx) => (
+                      <tr key={`${it.symbol}-${it.publishedAt}-${idx}`} className="border-b border-white/5">
+                        <td className="py-4 pr-3 text-slate-400">{idx + 1}</td>
 
-                <div className="flex flex-wrap gap-2">
-                  <select
-                    value={sort}
-                    onChange={(e) => setSort(e.target.value as SortKey)}
-                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
-                  >
-                    <option value="score">Sort: Highest score</option>
-                    <option value="newest">Sort: Newest</option>
-                    <option value="ret5d">Sort: Best +5D</option>
-                  </select>
+                        <td className="py-4 pr-3">
+                          <Link href={`/ticker/${encodeURIComponent(it.symbol)}`} className="font-black text-emerald-300 hover:underline">
+                            {it.symbol}
+                          </Link>
+                        </td>
 
-                  <select
-                    value={minScore}
-                    onChange={(e) => setMinScore(Number(e.target.value))}
-                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
-                  >
-                    <option value={50}>Score ≥ 50</option>
-                    <option value={60}>Score ≥ 60</option>
-                    <option value={70}>Score ≥ 70</option>
-                    <option value={80}>Score ≥ 80</option>
-                  </select>
-
-                  <select
-                    value={limit}
-                    onChange={(e) => setLimit(Number(e.target.value))}
-                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
-                  >
-                    <option value={20}>Top 20</option>
-                    <option value={30}>Top 30</option>
-                    <option value={50}>Top 50</option>
-                    <option value={100}>Top 100</option>
-                  </select>
-
-                  <select
-                    value={perPage}
-                    onChange={(e) => setPerPage(Number(e.target.value))}
-                    className="px-3 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none"
-                  >
-                    <option value={10}>Cards: 10</option>
-                    <option value={20}>Cards: 20</option>
-                    <option value={30}>Cards: 30</option>
-                    <option value={50}>Cards: 50</option>
-                  </select>
-
-                  <div className="flex rounded-2xl overflow-hidden border border-white/10 bg-slate-900/70">
-                    <button
-                      onClick={() => setView('grid')}
-                      className={`px-3 py-2.5 text-sm font-black ${view === 'grid' ? 'bg-white/10' : 'hover:bg-white/5'}`}
-                    >
-                      Grid
-                    </button>
-                    <button
-                      onClick={() => setView('list')}
-                      className={`px-3 py-2.5 text-sm font-black ${view === 'list' ? 'bg-white/10' : 'hover:bg-white/5'}`}
-                    >
-                      List
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Content */}
-            <div className="p-5 md:p-6">
-              {loading && (
-                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {Array.from({ length: 6 }).map((_, i) => (
-                    <SkeletonCard key={i} />
-                  ))}
-                </div>
-              )}
-
-              {!loading && err && (
-                <div className="rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-200 p-4">
-                  <div className="font-black">API error</div>
-                  <div className="text-sm mt-1">{err}</div>
-                </div>
-              )}
-
-              {!loading && !err && filtered.length === 0 && (
-                <div className="py-10 text-center text-slate-300">
-                  No items found. Try lowering the score filter.
-                </div>
-              )}
-
-              {!loading && !err && filtered.length > 0 && (
-                <>
-                  {view === 'grid' ? (
-                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {paged.map((it, idx) => {
-                        const tone = scoreTone(it.score);
-                        const pi = pricedInUI(it.pricedIn ?? null);
-                        const isTop = idx === 0 && sort === 'score' && !q;
-
-                        return (
-                          <div
-                            key={`${it.symbol}-${it.publishedAt}-${idx}`}
-                            className={`group rounded-3xl bg-white/5 border border-white/10 shadow-xl p-5 transition transform hover:-translate-y-0.5 hover:bg-white/[0.07] hover:border-emerald-400/25 ring-1 ${tone.ring}`}
-                          >
-                            <div className="flex items-start justify-between gap-4">
-                              <div className="flex flex-col">
-                                <div className="text-[11px] font-black tracking-wider text-emerald-200/90">
-                                  {isTop ? '🏆 TOP IMPACT' : impactLabel(it.score)}
-                                </div>
-                                <Link
-                                  href={`/ticker/${encodeURIComponent(it.symbol)}`}
-                                  className="mt-1 text-2xl font-black text-white group-hover:text-emerald-200 transition"
-                                >
-                                  {it.symbol}
-                                </Link>
-                              </div>
-
-                              <div className={`inline-flex items-center px-3 py-1.5 rounded-2xl border text-sm font-black ${tone.pill}`}>
-                                {it.score}
-                              </div>
-                            </div>
-
-                            <div className="mt-3 text-slate-200/90 font-semibold leading-snug line-clamp-3">
-                              {it.headline}
-                            </div>
-
-                            <div className="mt-2 text-[11px] text-slate-400">
-                              {fmtDate(it.publishedAt)}
-                              {it.type ? <span className="mx-2">•</span> : null}
-                              {it.type ? (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
-                                  {it.type}
-                                </span>
-                              ) : null}
-                            </div>
-
-                            {/* impact bar */}
-                            <div className="mt-4">
-                              <div className="h-2 w-full bg-slate-900/60 rounded-full overflow-hidden border border-white/10">
-                                <div
-                                  className="h-2 rounded-full bg-gradient-to-r from-emerald-400 via-cyan-400 to-indigo-400"
-                                  style={{ width: `${impactBarWidth(it.score)}%` }}
-                                />
-                              </div>
-                              <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
-                                <span>Impact confidence</span>
-                                <span>{impactBarWidth(it.score)}%</span>
-                              </div>
-                            </div>
-
-                            {/* priced-in */}
-                            <div className="mt-4">
-                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${pi.cls}`}>
-                                {pi.txt}
-                              </span>
-                            </div>
-
-                            {/* returns */}
-                            <div className="mt-4 flex flex-wrap gap-2">
-                              <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.ret1d)}`}>
-                                +1D {fmtPct(it.ret1d)}
-                              </span>
-                              <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.ret5d)}`}>
-                                +5D {fmtPct(it.ret5d)}
-                              </span>
-                              {typeof it.retPre5 === 'number' ? (
-                                <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.retPre5)}`}>
-                                  Pre-5 {fmtPct(it.retPre5)}
-                                </span>
-                              ) : null}
-                            </div>
-
-                            {/* actions */}
-                            <div className="mt-5 flex items-center justify-between">
-                              <Link
-                                href={`/ticker/${encodeURIComponent(it.symbol)}`}
-                                className="text-sm font-black text-emerald-200 hover:underline"
-                              >
-                                Open ticker →
-                              </Link>
-
-                              {it.url ? (
-                                <a
-                                  href={it.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-sm font-bold text-slate-300 hover:text-white hover:underline"
-                                >
-                                  Source ↗
-                                </a>
-                              ) : (
-                                <span className="text-sm text-slate-500">No source</span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="rounded-2xl border border-white/10 overflow-hidden">
-                      <div className="grid grid-cols-12 gap-2 px-4 py-3 text-[11px] font-black text-slate-300 bg-white/5">
-                        <div className="col-span-2">Ticker</div>
-                        <div className="col-span-6">Headline</div>
-                        <div className="col-span-1 text-right">Score</div>
-                        <div className="col-span-1 text-right">+1D</div>
-                        <div className="col-span-1 text-right">+5D</div>
-                        <div className="col-span-1 text-right">Link</div>
-                      </div>
-
-                      {paged.map((it, idx) => {
-                        const tone = scoreTone(it.score);
-                        return (
-                          <div
-                            key={`${it.symbol}-${it.publishedAt}-${idx}`}
-                            className="grid grid-cols-12 gap-2 px-4 py-4 border-t border-white/5 hover:bg-white/[0.04] transition"
-                          >
-                            <div className="col-span-2">
-                              <Link
-                                href={`/ticker/${encodeURIComponent(it.symbol)}`}
-                                className="font-black text-emerald-200 hover:underline"
-                              >
-                                {it.symbol}
-                              </Link>
-                              <div className="text-[11px] text-slate-400 mt-1">{fmtDate(it.publishedAt)}</div>
-                            </div>
-
-                            <div className="col-span-6">
-                              <div className="font-semibold text-slate-100">{it.headline}</div>
-                              <div className="mt-1 flex flex-wrap gap-2 items-center text-[11px] text-slate-400">
-                                {it.type ? (
-                                  <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
-                                    {it.type}
-                                  </span>
-                                ) : null}
-                                <span className={`px-2 py-0.5 rounded-full border ${pricedInUI(it.pricedIn ?? null).cls}`}>
-                                  {pricedInUI(it.pricedIn ?? null).txt}
-                                </span>
-                              </div>
-                            </div>
-
-                            <div className="col-span-1 text-right">
-                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${tone.pill}`}>
-                                {it.score}
-                              </span>
-                            </div>
-
-                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret1d)}`}>{fmtPct(it.ret1d)}</div>
-                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret5d)}`}>{fmtPct(it.ret5d)}</div>
-
-                            <div className="col-span-1 text-right">
-                              {it.url ? (
+                        <td className="py-4 pr-3 min-w-[360px]">
+                          <div className="font-semibold text-white/90">{it.headline}</div>
+                          <div className="text-[11px] text-slate-400 mt-1">
+                            {new Date(it.publishedAt).toLocaleString()}
+                            {it.url ? (
+                              <>
+                                {' '}·{' '}
                                 <a href={it.url} target="_blank" rel="noreferrer" className="text-slate-300 hover:underline">
-                                  ↗
+                                  source
                                 </a>
-                              ) : (
-                                <span className="text-slate-600">—</span>
-                              )}
-                            </div>
+                              </>
+                            ) : null}
                           </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                        </td>
 
-                  {/* footer note */}
-                  <div className="mt-6 rounded-2xl bg-slate-900/40 border border-white/10 p-4">
-                    <div className="font-black">How is the score calculated?</div>
-                    <div className="text-sm text-slate-300 mt-1">
-                      We use post-news returns (+1D/+5D) and reduce the score if price moved strongly <em>before</em> the news (priced-in penalty).
-                      This is an informational ranking — not financial advice.
-                    </div>
-                  </div>
+                        <td className="py-4 pr-3">
+                          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${badgeScore(it.score)}`}>
+                            {it.score}
+                          </span>
+                        </td>
 
-                  <div className="mt-6 text-[11px] text-slate-400">
-                    Showing <b>{paged.length}</b> of <b>{filtered.length}</b> filtered items.
-                  </div>
-                </>
-              )}
+                        <td className="py-4 pr-3 text-slate-200">{it.expectedImpact}</td>
+                        <td className="py-4 pr-3 text-slate-200">{it.realizedImpact}</td>
+
+                        <td className="py-4 pr-3">
+                          <div className="w-24">
+                            <div className="h-2 rounded-full bg-white/10 overflow-hidden">
+                              <div className="h-2 rounded-full bg-emerald-400" style={{ width: `${clamp(it.confidence ?? 0, 0, 100)}%` }} />
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-1">{clamp(it.confidence ?? 0, 0, 100)}%</div>
+                          </div>
+                        </td>
+
+                        <td className="py-4 pr-3">
+                          {it.tooEarly ? (
+                            <span className="text-[11px] font-black px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-200">
+                              ⚠️
+                            </span>
+                          ) : (
+                            <span className="text-slate-600">—</span>
+                          )}
+                        </td>
+
+                        <td className="py-4 pr-3 text-slate-200">{fmtPct(it.ret1d)}</td>
+                        <td className="py-4 pr-3 text-slate-200">{fmtPct(it.ret5d)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="mt-6 rounded-2xl bg-slate-900/50 border border-white/10 p-4 text-slate-200">
+              <div className="font-black">Interpretation</div>
+              <div className="text-sm text-slate-300 mt-1">
+                <b>Expected impact</b> is the score after priced-in penalty. <b>Realized impact</b> is raw move strength.
+                <b>Confidence</b> increases when +1D and +5D are both available; “⚠️” means it’s too early to judge.
+              </div>
             </div>
           </div>
+        </div>
 
-          <div className="text-[11px] text-slate-500 mt-6">
-            Disclaimer: Not financial advice. Scores are informational and based on historical reactions.
-          </div>
-        </section>
-      </div>
+        <div className="text-[11px] text-slate-400 mt-6">
+          Disclaimer: Not financial advice. Informational scoring based on historical price reactions.
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Stat({ label, value, accent }: { label: string; value: any; accent?: boolean }) {
+  return (
+    <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
+      <div className="text-xs text-slate-400">{label}</div>
+      <div className={`text-2xl font-black ${accent ? 'text-emerald-300' : ''}`}>{value}</div>
+    </div>
+  );
+}
+
+function MiniKpi({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-2xl bg-white/5 border border-white/10 p-3">
+      <div className="text-[11px] text-slate-400">{label}</div>
+      <div className="text-xl font-black text-white/90">{value}</div>
     </div>
   );
 }

@@ -7,6 +7,8 @@
     "start": "next start",
     "prisma": "prisma",
     "migrate": "prisma migrate dev"
+    "postinstall": "prisma generate"  
+}
   },
   "dependencies": {
     "@prisma/client": "^5.7.0",

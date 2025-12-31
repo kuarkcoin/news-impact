@@ -1,15 +1,15 @@
-// app/api/leaderboard/route.ts
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 60; // 60 saniye zaman aşımı
+export const maxDuration = 60; 
 
-// Listeyi test için kısa tutalım, çalışınca artırırız
+// Hisseler
 const SYMBOLS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMD"];
 
+// API Anahtarı
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
-// Yardımcılar
+// --- Yardımcı Fonksiyonlar ---
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
 function scoreFromRet(ret5d: number | null, ret1d: number | null, retPre5: number | null) {
@@ -32,62 +32,77 @@ function scoreFromRet(ret5d: number | null, ret1d: number | null, retPre5: numbe
   };
 }
 
-// --- DATA FETCHING ---
-
-async function fetchStockData(symbol: string) {
-  if (!FINNHUB_API_KEY) {
-    console.error("API KEY EKSİK!");
-    return null;
+// --- Demo Veri (API Çalışmazsa Bu Görünecek) ---
+const DEMO_ITEMS = [
+  {
+    symbol: "DEMO-AAPL",
+    headline: "⚠️ API Verisi Alınamadı - Bu Örnek Veridir",
+    type: "System",
+    publishedAt: new Date().toISOString(),
+    url: "https://google.com",
+    score: 85,
+    pricedIn: false,
+    ret1d: 0.02,
+    ret5d: 0.05,
+    retPre5: 0.01
+  },
+  {
+    symbol: "DEMO-TSLA",
+    headline: "API Key Eksik veya Piyasalar Tatil Olabilir",
+    type: "Alert",
+    publishedAt: new Date().toISOString(),
+    url: "#",
+    score: 65,
+    pricedIn: true,
+    ret1d: -0.01,
+    ret5d: 0.03,
+    retPre5: 0.04
   }
+];
+
+// --- Veri Çekme Fonksiyonu ---
+async function fetchStockData(symbol: string) {
+  if (!FINNHUB_API_KEY) return null;
 
   const now = new Date();
-  // TATİL GÜNLERİ İÇİN ARALIĞI ARTIRDIK: 10 GÜN
-  const fromNews = new Date(now.getTime() - 10 * 24 * 3600 * 1000); 
+  // 15 gün geriye bak (Tatil dönemleri için genişletildi)
+  const fromNews = new Date(now.getTime() - 15 * 24 * 3600 * 1000);
   const toUnix = Math.floor(now.getTime() / 1000);
-  const fromUnix = Math.floor(toUnix - 30 * 24 * 3600); 
+  const fromUnix = Math.floor(toUnix - 30 * 24 * 3600);
 
   try {
-    // 1. Haberleri Çek
-    const newsUrl = `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromNews.toISOString().slice(0,10)}&to=${now.toISOString().slice(0,10)}&token=${FINNHUB_API_KEY}`;
-    const newsRes = await fetch(newsUrl, { next: { revalidate: 60 } }); // Cache süresini test için 60sn yaptık
+    // 1. Haber Çek
+    const newsRes = await fetch(
+      `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromNews.toISOString().slice(0,10)}&to=${now.toISOString().slice(0,10)}&token=${FINNHUB_API_KEY}`,
+      { next: { revalidate: 30 } }
+    );
     
-    if (!newsRes.ok) {
-      console.log(`${symbol} news error: ${newsRes.status}`);
-      return null;
-    }
-    
+    if (!newsRes.ok) return null;
     const newsData = await newsRes.json();
-    if (!Array.isArray(newsData) || newsData.length === 0) {
-      console.log(`${symbol}: Haber bulunamadı.`);
-      return null;
-    }
+    if (!Array.isArray(newsData) || newsData.length === 0) return null;
 
-    // En yeni 1 haberi al
-    const topNews = newsData.slice(0, 1);
-    const item = topNews[0];
+    const item = newsData[0]; // En yeni haber
 
-    // 2. Fiyatları Çek
-    const candleUrl = `https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
-    const candleRes = await fetch(candleUrl, { next: { revalidate: 60 } });
+    // 2. Fiyat Çek
+    const candleRes = await fetch(
+      `https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`,
+      { next: { revalidate: 30 } }
+    );
     
-    if (!candleRes.ok) return null;
     const candles = await candleRes.json();
-    
     let ret1d = null, ret5d = null, retPre5 = null;
-    
-    // Candle verisi varsa hesapla, yoksa 0 kabul et
+
     if (candles.s === "ok" && candles.c) {
        const tArr = candles.t;
        const cArr = candles.c;
-       const newsTime = item.datetime;
-       let idx = tArr.findIndex((t: number) => t >= newsTime);
+       let idx = tArr.findIndex((t: number) => t >= item.datetime);
        if (idx === -1) idx = tArr.length - 1;
 
-       const basePrice = cArr[idx];
-       if (basePrice) {
-         if (idx + 1 < cArr.length) ret1d = (cArr[idx + 1] - basePrice) / basePrice;
-         if (idx + 5 < cArr.length) ret5d = (cArr[idx + 5] - basePrice) / basePrice;
-         if (idx - 5 >= 0) retPre5 = (basePrice - cArr[idx - 5]) / cArr[idx - 5];
+       const base = cArr[idx];
+       if (base) {
+         if (idx + 1 < cArr.length) ret1d = (cArr[idx + 1] - base) / base;
+         if (idx + 5 < cArr.length) ret5d = (cArr[idx + 5] - base) / base;
+         if (idx - 5 >= 0) retPre5 = (base - cArr[idx - 5]) / cArr[idx - 5];
        }
     }
 
@@ -105,54 +120,48 @@ async function fetchStockData(symbol: string) {
       ret5d,
       retPre5
     };
-
   } catch (e) {
-    console.error(`Error fetching ${symbol}:`, e);
+    console.error(`Error ${symbol}:`, e);
     return null;
   }
 }
 
-// --- ANA API HANDLER ---
-
+// --- ANA API ---
 export async function GET() {
   try {
+    // 1. API KEY KONTROLÜ
     if (!FINNHUB_API_KEY) {
-      return NextResponse.json({ error: "API Key Config Hatası" }, { status: 500 });
+      console.log("API Key eksik, demo veri dönülüyor.");
+      return NextResponse.json({
+        asOf: new Date().toISOString(),
+        items: DEMO_ITEMS // <--- API Key yoksa bunu göster
+      });
     }
 
-    console.log("Fetching data for symbols:", SYMBOLS);
     const promises = SYMBOLS.map(sym => fetchStockData(sym));
     const results = await Promise.all(promises);
-
     const flatResults = results.filter(item => item !== null);
-    
-    // Eğer hiç veri gelmezse, Frontend boş görünmesin diye sahte bir veri dönelim (Debug için)
+
+    // 2. BOŞ VERİ KONTROLÜ
     if (flatResults.length === 0) {
-       console.log("Hiç veri bulunamadı, örnek veri dönülüyor.");
-       /* // TEST İÇİN BUNU AÇABİLİRSİN:
-       flatResults.push({
-         symbol: "TEST-DATA",
-         headline: "Piyasalar kapalı olduğu için veri çekilemedi. API Key kontrol edin.",
-         type: "System",
-         publishedAt: new Date().toISOString(),
-         url: "#",
-         score: 50,
-         pricedIn: false,
-         ret1d: 0,
-         ret5d: 0,
-         retPre5: 0
-       });
-       */
+      console.log("Veri bulunamadı, demo veri dönülüyor.");
+      return NextResponse.json({
+        asOf: new Date().toISOString(),
+        items: DEMO_ITEMS // <--- API'den veri gelmezse bunu göster
+      });
     }
 
-    flatResults.sort((a, b) => (b?.score || 0) - (a?.score || 0));
-
+    // 3. GERÇEK VERİ
+    flatResults.sort((a, b) => (b.score || 0) - (a.score || 0));
     return NextResponse.json({
       asOf: new Date().toISOString(),
       items: flatResults
     });
 
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({
+      asOf: new Date().toISOString(),
+      items: DEMO_ITEMS // <--- Hata olursa bunu göster
+    });
   }
 }

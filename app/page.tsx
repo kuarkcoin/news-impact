@@ -73,10 +73,7 @@ function ProgressBar({ value, className = '' }: { value: number; className?: str
         <span className="font-black">{clamped}%</span>
       </div>
       <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-        <div
-          className="h-full bg-emerald-400 transition-all"
-          style={{ width: `${clamped}%` }}
-        />
+        <div className="h-full bg-emerald-400 transition-all" style={{ width: `${clamped}%` }} />
       </div>
     </div>
   );
@@ -109,10 +106,7 @@ export default function HomePage() {
   const [minScore, setMinScore] = useState(50);
   const [sortBy, setSortBy] = useState<'score' | 'newest' | 'confidence'>('score');
 
-  // ✅ Refresh için tetikleyici
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  // ✅ AbortController ile fetch (minScore veya refreshKey değişince)
+  // ✅ Fetch: refresh yok (cron+kv otomatik güncelliyor)
   useEffect(() => {
     const controller = new AbortController();
 
@@ -121,25 +115,27 @@ export default function HomePage() {
         setLoading(true);
         setErr(null);
 
-        const res = await fetch(
-          `/api/leaderboard?min=${minScore}&limit=50`,
-          { cache: 'no-store', signal: controller.signal }
-        );
+        const res = await fetch(`/api/leaderboard?min=${minScore}&limit=50`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
 
-        if (!res.ok) throw new Error('API response failed');
+        if (!res.ok) {
+          const t = await res.text().catch(() => '');
+          throw new Error(t || `API failed (${res.status})`);
+        }
+
         const json = (await res.json()) as ApiResp;
         setData(json);
       } catch (e: any) {
-        if (e?.name !== 'AbortError') {
-          setErr(e?.message || 'Bilinmeyen hata');
-        }
+        if (e?.name !== 'AbortError') setErr(e?.message || 'Bilinmeyen hata');
       } finally {
         setLoading(false);
       }
     })();
 
     return () => controller.abort();
-  }, [minScore, refreshKey]);
+  }, [minScore]);
 
   const items = useMemo(() => {
     const list = data?.items || [];
@@ -161,7 +157,6 @@ export default function HomePage() {
     return sorted;
   }, [data, q, sortBy]);
 
-  // ✅ Mobilde Top1, sm+ Top3
   const top1 = items.slice(0, 1);
   const top3 = items.slice(0, 3);
 
@@ -179,7 +174,7 @@ export default function HomePage() {
       <section className="max-w-6xl mx-auto px-4 pt-10 pb-6">
         <div className="flex flex-col gap-4">
           <div className="inline-flex items-center gap-2 w-fit px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-200">
-            📈 NewsImpact • Nasdaq watchlist • demo scoring
+            📈 NewsImpact • Nasdaq watchlist • cron + kv
           </div>
 
           <h1 className="text-3xl sm:text-4xl md:text-5xl font-black leading-tight">
@@ -216,14 +211,12 @@ export default function HomePage() {
 
       {/* TOP CARDS */}
       <section className="max-w-6xl mx-auto px-4 pb-4">
-        {/* mobile: top1 */}
         {top1.length > 0 && (
           <div className="grid gap-4 sm:hidden">
             <TopCard it={top1[0]} />
           </div>
         )}
 
-        {/* sm+: top3 */}
         {top3.length > 0 && (
           <div className="hidden sm:grid md:grid-cols-3 gap-4">
             {top3.map((it) => (
@@ -242,19 +235,9 @@ export default function HomePage() {
               <div>
                 <div className="text-xl font-black">Leaderboard</div>
                 <div className="text-xs text-slate-300 mt-1">
-                  {data?.asOf ? `As of ${fmtDate(data.asOf)}` : 'Live'}
+                  {data?.asOf ? `Last updated ${fmtDate(data.asOf)} (auto)` : 'Live'}
                 </div>
               </div>
-
-              {/* ✅ Refresh button */}
-              <button
-                onClick={() => setRefreshKey((x) => x + 1)}
-                className="mt-1 inline-flex items-center justify-center w-10 h-10 rounded-2xl bg-slate-900/70 border border-white/10 hover:bg-white/10 transition"
-                title="Yenile"
-                aria-label="Yenile"
-              >
-                ↻
-              </button>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
@@ -306,7 +289,7 @@ export default function HomePage() {
 
             {!loading && !err && items.length === 0 && (
               <div className="py-10 text-center text-slate-300">
-                No items. Try lowering Score.
+                No items. (Cron henüz çalışmamış olabilir)
               </div>
             )}
 
@@ -349,12 +332,7 @@ export default function HomePage() {
                             {it.url ? (
                               <>
                                 {' '}·{' '}
-                                <a
-                                  href={it.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-slate-300 hover:underline"
-                                >
+                                <a href={it.url} target="_blank" rel="noreferrer" className="text-slate-300 hover:underline">
                                   source
                                 </a>
                               </>
@@ -399,8 +377,8 @@ export default function HomePage() {
             <div className="mt-6 rounded-2xl bg-slate-900/50 border border-white/10 p-4 text-slate-200">
               <div className="font-black">Interpretation</div>
               <div className="text-sm text-slate-300 mt-1">
-                <b>Expected impact</b> is the score after priced-in penalty. <b>Realized impact</b> is raw move strength.
-                <b>Confidence</b> increases when +1D and +5D are available; “⚠️” means it’s too early to judge.
+                <b>Expected</b> is text+priced-in estimate. <b>Realized</b> is actual move strength (when +1D/+5D available).
+                <b>Confidence</b> rises when +1D and +5D exist; “⚠️” means it’s too early to judge.
               </div>
             </div>
           </div>

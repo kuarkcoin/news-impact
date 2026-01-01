@@ -4,6 +4,8 @@ import { kv } from "@vercel/kv";
 
 export const runtime = "edge";
 
+type Dir = -1 | 0 | 1;
+
 type LeaderItem = {
   symbol: string;
   headline: string;
@@ -24,6 +26,14 @@ type LeaderItem = {
   tooEarly: boolean;
 
   technicalContext?: string | null;
+
+  // ✅ NEW (scan tarafıyla uyum)
+  expectedDir?: Dir;
+  realizedDir?: Dir;
+  rsi14?: number | null;
+  breakout20?: boolean | null;
+  bullTrap?: boolean | null;
+  volumeSpike?: boolean | null;
 };
 
 function clamp(n: number, a: number, b: number) {
@@ -57,7 +67,7 @@ export async function GET(req: Request) {
 
     let items = data.items;
 
-    // ✅ q filtresi: technicalContext dahil
+    // ✅ q filtresi: technicalContext + headline/type/symbol
     if (q) {
       items = items.filter((it) => {
         const blob = `${it.symbol} ${it.headline} ${it.type || ""} ${it.technicalContext || ""}`.toLowerCase();
@@ -89,7 +99,6 @@ export async function GET(req: Request) {
         { status: 500 }
       );
     }
-    // prod: sessiz degrade
     return NextResponse.json(
       { asOf: new Date().toISOString(), items: [] },
       { status: 200 }

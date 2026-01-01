@@ -8,18 +8,31 @@ export const maxDuration = 60;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
 // =========================
-// CRON AUTH (VERCEL + MANUAL)
+// CRON AUTH (VERCEL + OPTIONAL MANUAL)
 // =========================
-function assertCronAuth(req: Request) {
-  // Vercel Cron otomatik header gönderir
-  if (req.headers.get("x-vercel-cron") === "1") return true;
+function isVercelCron(req: Request) {
+  return req.headers.get("x-vercel-cron") === "1";
+}
 
-  // Manuel test
+function hasValidSecret(req: Request) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
 
   const { searchParams } = new URL(req.url);
-  return searchParams.get("secret") === secret;
+  if (searchParams.get("secret") === secret) return true;
+
+  const authHeader = req.headers.get("authorization");
+  if (authHeader === `Bearer ${secret}`) return true;
+
+  return false;
+}
+
+function assertCronAuth(req: Request) {
+  // Vercel Cron tetiklerinde header otomatik gelir
+  if (isVercelCron(req)) return true;
+
+  // Manuel test sadece CRON_SECRET varsa çalışsın
+  return hasValidSecret(req);
 }
 
 // =========================
@@ -71,15 +84,14 @@ type LeaderItem = {
   confidence: number;
   tooEarly: boolean;
 
-  // ✅ NEW
-  expectedDir: -1 | 0 | 1;  // headline direction
-  realizedDir: -1 | 0 | 1;  // +1D/+5D direction
+  expectedDir: -1 | 0 | 1;
+  realizedDir: -1 | 0 | 1;
   rsi14: number | null;
   breakout20: boolean | null;
   bullTrap: boolean | null;
   volumeSpike: boolean | null;
 
-  technicalContext: string | null; // UI’de gözükecek birleşik context
+  technicalContext: string | null;
 };
 
 type CandleData = { t: number[]; c: number[]; v?: number[] };
@@ -171,6 +183,14 @@ function expectedDirectionFromHeadline(headline: string): -1 | 0 | 1 {
   return 0;
 }
 
+function realizedDirection(ret1d: number | null, ret5d: number | null): -1 | 0 | 1 {
+  const r = (ret5d ?? ret1d);
+  if (typeof r !== "number") return 0;
+  if (r > 0.01) return 1;
+  if (r < -0.01) return -1;
+  return 0;
+}
+
 function calcExpectedImpact(headline: string, retPre5: number | null) {
   const s = sentimentFromHeadline(headline);
 
@@ -192,14 +212,6 @@ function calcRealizedImpact(ret1d: number | null, ret5d: number | null) {
 
   const base = clamp(Math.round(Math.abs(rUsed) * 1000), 0, 50);
   return clamp(50 + base, 50, 100);
-}
-
-function realizedDirection(ret1d: number | null, ret5d: number | null): -1 | 0 | 1 {
-  const r = (ret5d ?? ret1d);
-  if (typeof r !== "number") return 0;
-  if (r > 0.01) return 1;
-  if (r < -0.01) return -1;
-  return 0;
 }
 
 function combineScore(expectedImpact: number, realizedImpact: number | null, pricedIn: boolean) {
@@ -274,7 +286,7 @@ function breakout20At(closes: number[], idx: number) {
   if (idx < 21) return null;
   const prevHigh = maxAt(closes, idx - 1, 20);
   if (prevHigh === null) return null;
-  return closes[idx] > prevHigh * 1.002; // küçük buffer
+  return closes[idx] > prevHigh * 1.002;
 }
 
 function technicalContextAt(closes: number[], idx: number) {
@@ -316,7 +328,6 @@ function technicalContextAt(closes: number[], idx: number) {
   return parts.join(" · ");
 }
 
-// ✅ “HEPSİ”: trend + pre-news + catalyst + RSI + breakout + volume + bull trap
 function buildTechnicalContext(opts: {
   retPre5: number | null;
   baseTech: string | null;
@@ -473,7 +484,6 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     const confidence = calcConfidence(ret1d, ret5d, exp.pricedIn);
     const tooEarly = realizedImpact === null;
 
-    // ✅ bull trap: breakout var ama 1D/5D ters + sert eksi
     const bullTrap =
       breakout20 === true &&
       ((typeof ret1d === "number" && ret1d < -0.03) || (typeof ret5d === "number" && ret5d < -0.05));
@@ -534,7 +544,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "No FINNHUB_API_KEY" }, { status: 500 });
   }
 
-  // ✅ AUTH ZORUNLU
+  // ✅ AUTH ZORUNLU (cron header veya secret)
   if (!assertCronAuth(req)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -542,7 +552,7 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
 
-    // ✅ reset
+    // ✅ reset (güvenli: sadece cron/secret)
     if (searchParams.get("reset") === "1") {
       await kv.del("pool:v1");
       await kv.del("symbols:cursor");

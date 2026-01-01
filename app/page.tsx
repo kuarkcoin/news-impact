@@ -25,6 +25,16 @@ type LeaderItem = {
 
 type ApiResp = { asOf: string; items: LeaderItem[] };
 
+// ✅ Accuracy metrics type (from /api/metrics)
+type Metrics = {
+  updatedAt: string;
+  totalMeasured: number;
+
+  directionAccuracy: number; // %
+  avgAbsError: number;       // pts
+  highScoreHitRate: number;  // %
+};
+
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
@@ -102,11 +112,14 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  // ✅ Accuracy dashboard data
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+
   const [q, setQ] = useState('');
   const [minScore, setMinScore] = useState(50);
   const [sortBy, setSortBy] = useState<'score' | 'newest' | 'confidence'>('score');
 
-  // ✅ Fetch: refresh yok (cron+kv otomatik güncelliyor)
+  // ✅ Fetch leaderboard (refresh yok)
   useEffect(() => {
     const controller = new AbortController();
 
@@ -136,6 +149,26 @@ export default function HomePage() {
 
     return () => controller.abort();
   }, [minScore]);
+
+  // ✅ Fetch metrics once
+  useEffect(() => {
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        const res = await fetch('/api/metrics', { cache: 'no-store', signal: controller.signal });
+        if (!res.ok) return;
+        const json = (await res.json()) as Metrics;
+        setMetrics(json);
+      } catch (e: any) {
+        if (e?.name !== 'AbortError') {
+          // sessiz geç: metrics gelmezse UI bozulmasın
+        }
+      }
+    })();
+
+    return () => controller.abort();
+  }, []);
 
   const items = useMemo(() => {
     const list = data?.items || [];
@@ -185,6 +218,28 @@ export default function HomePage() {
             Each headline gets: <b>Expected</b> vs <b>Realized</b> impact, a <b>Confidence</b> score, and a warning if it’s <b>too early</b>.
           </p>
 
+          {/* ✅ Accuracy Dashboard (NEW) */}
+          <div className="rounded-3xl bg-white/5 border border-white/10 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="font-black">Accuracy dashboard</div>
+              <div className="text-[11px] text-slate-400">
+                {metrics?.updatedAt ? `Updated ${fmtDate(metrics.updatedAt)}` : '—'}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3">
+              <Stat label="Measured items" value={metrics ? metrics.totalMeasured : '—'} />
+              <Stat label="Direction accuracy" value={metrics ? `${metrics.directionAccuracy}%` : '—'} accent />
+              <Stat label="Avg error" value={metrics ? `${metrics.avgAbsError} pts` : '—'} />
+              <Stat label="High-score hit" value={metrics ? `${metrics.highScoreHitRate}%` : '—'} />
+            </div>
+
+            <div className="text-[11px] text-slate-400 mt-2">
+              Based on items with realized reactions (+1D / +5D). Metrics improve as more items get measured.
+            </div>
+          </div>
+
+          {/* existing stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
             <Stat label="Items" value={stats.total} />
             <Stat label="Avg score" value={stats.total ? stats.avgScore : '—'} accent />

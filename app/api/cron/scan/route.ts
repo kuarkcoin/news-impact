@@ -1,22 +1,26 @@
 // app/api/cron/scan/route.ts
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
-// ✅ CRON AUTH (VERCEL)
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
+
+// =========================
+// CRON AUTH (VERCEL + MANUAL)
+// =========================
 function assertCronAuth(req: Request) {
-  // Vercel cron tetiklemelerinde otomatik gelir
+  // Vercel Cron otomatik header gönderir
   if (req.headers.get("x-vercel-cron") === "1") return true;
 
-  // manuel test için opsiyonel (lokalde curl ile çağırmak için)
+  // Manuel test
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
 
   const { searchParams } = new URL(req.url);
   return searchParams.get("secret") === secret;
 }
-export const runtime = "nodejs";
-export const maxDuration = 60;
-
-const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
 // =========================
 // SETTINGS (Finnhub Free-safe)
@@ -67,10 +71,18 @@ type LeaderItem = {
   confidence: number;
   tooEarly: boolean;
 
-  technicalContext: string | null;
+  // ✅ NEW
+  expectedDir: -1 | 0 | 1;  // headline direction
+  realizedDir: -1 | 0 | 1;  // +1D/+5D direction
+  rsi14: number | null;
+  breakout20: boolean | null;
+  bullTrap: boolean | null;
+  volumeSpike: boolean | null;
+
+  technicalContext: string | null; // UI’de gözükecek birleşik context
 };
 
-type CandleData = { t: number[]; c: number[] };
+type CandleData = { t: number[]; c: number[]; v?: number[] };
 
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
@@ -134,7 +146,7 @@ async function fetchWithRetry(url: string, maxRetries = 3) {
 }
 
 // =========================
-// SCORING
+// SCORING / DIRECTION
 // =========================
 function sentimentFromHeadline(headline: string) {
   const text = headline.toLowerCase();
@@ -150,6 +162,13 @@ function sentimentFromHeadline(headline: string) {
   if (text.includes("earnings") || text.includes("guidance") || text.includes("eps")) s += 10;
 
   return clamp(s, -30, 30);
+}
+
+function expectedDirectionFromHeadline(headline: string): -1 | 0 | 1 {
+  const s = sentimentFromHeadline(headline);
+  if (s >= 10) return 1;
+  if (s <= -10) return -1;
+  return 0;
 }
 
 function calcExpectedImpact(headline: string, retPre5: number | null) {
@@ -175,6 +194,14 @@ function calcRealizedImpact(ret1d: number | null, ret5d: number | null) {
   return clamp(50 + base, 50, 100);
 }
 
+function realizedDirection(ret1d: number | null, ret5d: number | null): -1 | 0 | 1 {
+  const r = (ret5d ?? ret1d);
+  if (typeof r !== "number") return 0;
+  if (r > 0.01) return 1;
+  if (r < -0.01) return -1;
+  return 0;
+}
+
 function combineScore(expectedImpact: number, realizedImpact: number | null, pricedIn: boolean) {
   let score = realizedImpact === null
     ? expectedImpact
@@ -193,7 +220,7 @@ function calcConfidence(ret1d: number | null, ret5d: number | null, pricedIn: bo
 }
 
 // =========================
-// TECHNICAL CONTEXT (trend/momentum/levels) - sende vardı, aynen kullan
+// TECH HELPERS (MA / RSI / LEVELS / BREAKOUT / VOLUME)
 // =========================
 function smaAt(closes: number[], idx: number, period: number) {
   const start = idx - period + 1;
@@ -202,24 +229,60 @@ function smaAt(closes: number[], idx: number, period: number) {
   for (let i = start; i <= idx; i++) sum += closes[i];
   return sum / period;
 }
+
 function minAt(closes: number[], idx: number, lookback: number) {
   const start = Math.max(0, idx - lookback + 1);
   let m = Infinity;
   for (let i = start; i <= idx; i++) m = Math.min(m, closes[i]);
   return Number.isFinite(m) ? m : null;
 }
+
 function maxAt(closes: number[], idx: number, lookback: number) {
   const start = Math.max(0, idx - lookback + 1);
   let m = -Infinity;
   for (let i = start; i <= idx; i++) m = Math.max(m, closes[i]);
   return Number.isFinite(m) ? m : null;
 }
-function technicalContextAt(c: number[], idx: number) {
-  if (!c?.length || idx < 0 || idx >= c.length) return null;
 
-  const price = c[idx];
-  const ma50 = smaAt(c, idx, 50);
-  const ma200 = smaAt(c, idx, 200);
+function rsiAt(closes: number[], idx: number, period: number) {
+  if (idx - period < 0) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let i = idx - period + 1; i <= idx; i++) {
+    const ch = closes[i] - closes[i - 1];
+    if (ch >= 0) gains += ch;
+    else losses += -ch;
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+function volumeSpikeAt(vols: number[] | undefined, idx: number) {
+  if (!vols?.length) return null;
+  if (idx < 5 || idx >= vols.length) return null;
+  const recent = vols.slice(idx - 5, idx);
+  const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const eventV = vols[idx];
+  if (!avg || !Number.isFinite(avg) || !Number.isFinite(eventV)) return null;
+  return eventV > avg * 2.5;
+}
+
+function breakout20At(closes: number[], idx: number) {
+  if (idx < 21) return null;
+  const prevHigh = maxAt(closes, idx - 1, 20);
+  if (prevHigh === null) return null;
+  return closes[idx] > prevHigh * 1.002; // küçük buffer
+}
+
+function technicalContextAt(closes: number[], idx: number) {
+  if (!closes?.length || idx < 0 || idx >= closes.length) return null;
+
+  const price = closes[idx];
+  const ma50 = smaAt(closes, idx, 50);
+  const ma200 = smaAt(closes, idx, 200);
 
   let trend = "🟨 Range";
   if (ma50 !== null && ma200 !== null) {
@@ -232,12 +295,12 @@ function technicalContextAt(c: number[], idx: number) {
 
   let momentumTag: string | null = null;
   if (idx - 10 >= 0) {
-    const r10 = (price - c[idx - 10]) / c[idx - 10];
+    const r10 = (price - closes[idx - 10]) / closes[idx - 10];
     if (Math.abs(r10) >= 0.06) momentumTag = "🔥 Momentum";
   }
 
-  const sup = minAt(c, idx, 20);
-  const res = maxAt(c, idx, 20);
+  const sup = minAt(closes, idx, 20);
+  const res = maxAt(closes, idx, 20);
   let levelTag: string | null = null;
 
   if (sup !== null) {
@@ -253,20 +316,32 @@ function technicalContextAt(c: number[], idx: number) {
   return parts.join(" · ");
 }
 
-// ✅ NEW: text/catalyst + pre-news context birleştiren builder
+// ✅ “HEPSİ”: trend + pre-news + catalyst + RSI + breakout + volume + bull trap
 function buildTechnicalContext(opts: {
   retPre5: number | null;
   baseTech: string | null;
   category?: string | null;
   headline?: string | null;
+  rsi14: number | null;
+  breakout20: boolean | null;
+  volumeSpike: boolean | null;
+  bullTrap: boolean | null;
 }) {
-  const { retPre5, baseTech, category, headline } = opts;
+  const { retPre5, baseTech, category, headline, rsi14, breakout20, volumeSpike, bullTrap } = opts;
   const parts: string[] = [];
 
-  // 1) candle’dan gelen trend/momentum/support (varsa)
   if (baseTech) parts.push(baseTech);
 
-  // 2) pre-news 5g hareket (fallback + ekstra anlam)
+  if (typeof rsi14 === "number") {
+    if (rsi14 >= 70) parts.push(`🟥 RSI ${rsi14.toFixed(0)} (overbought)`);
+    else if (rsi14 <= 30) parts.push(`🟩 RSI ${rsi14.toFixed(0)} (oversold)`);
+    else parts.push(`🟦 RSI ${rsi14.toFixed(0)}`);
+  }
+
+  if (breakout20 === true) parts.push("🚪 20D breakout");
+  if (volumeSpike === true) parts.push("📊 High volume");
+  if (bullTrap === true) parts.push("🪤 Bull trap risk");
+
   if (typeof retPre5 === "number") {
     if (retPre5 > 0.12) parts.push("🚀 Strong pre-news run-up");
     else if (retPre5 > 0.06) parts.push("📈 Moderate pre-news rally");
@@ -275,7 +350,6 @@ function buildTechnicalContext(opts: {
     else if (Math.abs(retPre5) < 0.02) parts.push("🟨 Sideways consolidation");
   }
 
-  // 3) catalyst (category + headline ipuçları)
   const cat = (category || "").toLowerCase();
   const hl = (headline || "").toLowerCase();
 
@@ -289,7 +363,6 @@ function buildTechnicalContext(opts: {
     parts.push("🧪 Product launch");
   }
 
-  // fallback
   if (!parts.length) return "General news event";
   return parts.join(" + ");
 }
@@ -316,7 +389,11 @@ async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number
     const data = await res.json();
     if (data?.s !== "ok") return null;
 
-    const payload: CandleData = { t: data.t as number[], c: data.c as number[] };
+    const payload: CandleData = {
+      t: data.t as number[],
+      c: data.c as number[],
+      v: Array.isArray(data.v) ? (data.v as number[]) : undefined,
+    };
 
     try { await kv.set(key, payload, { ex: CANDLE_CACHE_TTL_SEC }); } catch {}
 
@@ -370,6 +447,9 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     let retPre5: number | null = null;
 
     let baseTech: string | null = null;
+    let rsi14: number | null = null;
+    let breakout20: boolean | null = null;
+    let volumeSpike: boolean | null = null;
 
     if (candles?.t?.length && candles?.c?.length) {
       const idx = findLastLE(candles.t, Number(n.datetime));
@@ -381,6 +461,9 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
         if (idx - 5 >= 0) retPre5 = (base - candles.c[idx - 5]) / candles.c[idx - 5];
 
         baseTech = technicalContextAt(candles.c, idx);
+        rsi14 = rsiAt(candles.c, idx, 14);
+        breakout20 = breakout20At(candles.c, idx);
+        volumeSpike = volumeSpikeAt(candles.v, idx);
       }
     }
 
@@ -390,12 +473,23 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     const confidence = calcConfidence(ret1d, ret5d, exp.pricedIn);
     const tooEarly = realizedImpact === null;
 
-    // ✅ technicalContext GARANTİ
+    // ✅ bull trap: breakout var ama 1D/5D ters + sert eksi
+    const bullTrap =
+      breakout20 === true &&
+      ((typeof ret1d === "number" && ret1d < -0.03) || (typeof ret5d === "number" && ret5d < -0.05));
+
+    const expectedDir = expectedDirectionFromHeadline(String(n.headline));
+    const realizedDir = realizedDirection(ret1d, ret5d);
+
     const technicalContext = buildTechnicalContext({
       retPre5,
       baseTech,
       category: n.category ?? null,
       headline: String(n.headline),
+      rsi14,
+      breakout20,
+      volumeSpike,
+      bullTrap,
     });
 
     items.push({
@@ -416,6 +510,13 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
       confidence,
       tooEarly,
 
+      expectedDir,
+      realizedDir,
+      rsi14,
+      breakout20,
+      bullTrap,
+      volumeSpike,
+
       technicalContext,
     });
 
@@ -431,6 +532,11 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
 export async function GET(req: Request) {
   if (!FINNHUB_API_KEY) {
     return NextResponse.json({ error: "No FINNHUB_API_KEY" }, { status: 500 });
+  }
+
+  // ✅ AUTH ZORUNLU
+  if (!assertCronAuth(req)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {

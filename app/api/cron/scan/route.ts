@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // =========================
 // CRON AUTH (VERCEL + OPTIONAL MANUAL)
@@ -28,10 +29,7 @@ function hasValidSecret(req: Request) {
 }
 
 function assertCronAuth(req: Request) {
-  // Vercel Cron tetiklerinde header otomatik gelir
   if (isVercelCron(req)) return true;
-
-  // Manuel test sadece CRON_SECRET varsa çalışsın
   return hasValidSecret(req);
 }
 
@@ -44,6 +42,11 @@ const MAX_POOL_ITEMS = 600;
 const MAX_NEWS_AGE_DAYS = 10;
 const CANDLE_LOOKBACK_DAYS = 260;
 const CANDLE_CACHE_TTL_SEC = 6 * 60 * 60; // 6 saat
+
+// ✅ Gemini safety limits
+const GEMINI_MAX_PER_RUN = 5;                 // her cron koşusunda max 5 yorum
+const GEMINI_ONLY_IF_SCORE_GTE = 75;          // düşük skorlara çağırma
+const GEMINI_CACHE_TTL_SEC = 7 * 24 * 3600;   // 7 gün cache
 
 // =========================
 // UNIVERSE
@@ -92,6 +95,11 @@ type LeaderItem = {
   volumeSpike: boolean | null;
 
   technicalContext: string | null;
+
+  // ✅ Gemini yorumları
+  aiSummary?: string | null;     // tek cümle
+  aiBullets?: string[] | null;   // 3-5 madde
+  aiSentiment?: "bullish" | "bearish" | "mixed" | "neutral" | null;
 };
 
 type CandleData = { t: number[]; c: number[]; v?: number[] };
@@ -232,7 +240,7 @@ function calcConfidence(ret1d: number | null, ret5d: number | null, pricedIn: bo
 }
 
 // =========================
-// TECH HELPERS (MA / RSI / LEVELS / BREAKOUT / VOLUME)
+// TECH HELPERS
 // =========================
 function smaAt(closes: number[], idx: number, period: number) {
   const start = idx - period + 1;
@@ -376,6 +384,86 @@ function buildTechnicalContext(opts: {
 
   if (!parts.length) return "General news event";
   return parts.join(" + ");
+}
+
+// =========================
+// GEMINI (cached)
+// =========================
+function aiCacheKey(it: { symbol: string; publishedAt: string; headline: string }) {
+  const h = (it.headline || "").trim().toLowerCase().slice(0, 180);
+  return `ai:v1:${it.symbol}:${it.publishedAt}:${h}`;
+}
+
+async function geminiComment(params: {
+  symbol: string;
+  headline: string;
+  technicalContext: string | null;
+  retPre5: number | null;
+  ret1d: number | null;
+  ret5d: number | null;
+  score: number;
+  pricedIn: boolean | null;
+}) {
+  if (!GEMINI_API_KEY) return null;
+
+  const prompt = `
+Sen bir finans haber-reaksiyon analisti asistanısın. Yatırım tavsiyesi verme.
+Aşağıdaki tek başlığa göre, KISA ve NET şekilde Türkçe yorum üret:
+
+Hisse: ${params.symbol}
+Başlık: ${params.headline}
+Teknik Context: ${params.technicalContext ?? "—"}
+Pre-5d: ${params.retPre5 ?? "—"}
++1D: ${params.ret1d ?? "—"}
++5D: ${params.ret5d ?? "—"}
+Score: ${params.score}
+Priced-in: ${params.pricedIn === true ? "yes" : params.pricedIn === false ? "no" : "unknown"}
+
+Çıktı FORMAT:
+- summary: Tek cümle (maks 18 kelime)
+- sentiment: bullish | bearish | mixed | neutral
+- bullets: 3 madde (her madde 10-14 kelime, emoji serbest)
+`;
+
+  const url =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" +
+    encodeURIComponent(GEMINI_API_KEY);
+
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.4,
+      maxOutputTokens: 220,
+    },
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) return null;
+
+  const json = await res.json();
+  const text =
+    json?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n") || "";
+
+  // very light parse
+  const summaryMatch = text.match(/summary:\s*(.+)/i);
+  const sentimentMatch = text.match(/sentiment:\s*(bullish|bearish|mixed|neutral)/i);
+  const bulletsMatch = text
+    .split("\n")
+    .filter((l: string) => l.trim().startsWith("-") || l.trim().startsWith("•"))
+    .map((l: string) => l.replace(/^[-•]\s*/, "").trim())
+    .filter(Boolean);
+
+  const summary = summaryMatch?.[1]?.trim() || null;
+  const aiSentiment = (sentimentMatch?.[1]?.toLowerCase() as any) || null;
+  const aiBullets = bulletsMatch.length ? bulletsMatch.slice(0, 5) : null;
+
+  if (!summary && !aiBullets) return null;
+  return { aiSummary: summary, aiSentiment, aiBullets };
 }
 
 // =========================
@@ -528,6 +616,10 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
       volumeSpike,
 
       technicalContext,
+
+      aiSummary: null,
+      aiBullets: null,
+      aiSentiment: null,
     });
 
     if (items.length >= PER_SYMBOL) break;
@@ -544,7 +636,6 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "No FINNHUB_API_KEY" }, { status: 500 });
   }
 
-  // ✅ AUTH ZORUNLU (cron header veya secret)
   if (!assertCronAuth(req)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -552,7 +643,6 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
 
-    // ✅ reset (güvenli: sadece cron/secret)
     if (searchParams.get("reset") === "1") {
       await kv.del("pool:v1");
       await kv.del("symbols:cursor");
@@ -576,29 +666,76 @@ export async function GET(req: Request) {
       }
     }
 
+    // ✅ Gemini: en fazla 5 item, score yüksek olanlardan
+    let aiUsed = 0;
+    if (GEMINI_API_KEY) {
+      const candidates = [...newItems]
+        .filter((x) => (x.score ?? 0) >= GEMINI_ONLY_IF_SCORE_GTE)
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+      for (const it of candidates) {
+        if (aiUsed >= GEMINI_MAX_PER_RUN) break;
+
+        const k = aiCacheKey(it);
+        try {
+          const cached = (await kv.get(k)) as any;
+          if (cached?.aiSummary || cached?.aiBullets) {
+            it.aiSummary = cached.aiSummary ?? null;
+            it.aiBullets = cached.aiBullets ?? null;
+            it.aiSentiment = cached.aiSentiment ?? null;
+            continue;
+          }
+        } catch {}
+
+        try {
+          const out = await geminiComment({
+            symbol: it.symbol,
+            headline: it.headline,
+            technicalContext: it.technicalContext,
+            retPre5: it.retPre5,
+            ret1d: it.ret1d,
+            ret5d: it.ret5d,
+            score: it.score,
+            pricedIn: it.pricedIn,
+          });
+
+          if (out) {
+            it.aiSummary = out.aiSummary ?? null;
+            it.aiBullets = out.aiBullets ?? null;
+            it.aiSentiment = out.aiSentiment ?? null;
+
+            try {
+              await kv.set(k, out, { ex: GEMINI_CACHE_TTL_SEC });
+            } catch {}
+            aiUsed++;
+          }
+        } catch (e) {
+          // sessiz geç: Gemini error olursa cron bozulmasın
+        }
+      }
+    }
+
     const poolRaw = (await kv.get("pool:v1")) as { asOf: string; items: LeaderItem[] } | null;
     const oldItems = poolRaw?.items || [];
 
-    // de-dup
     const mergedAll = [...newItems, ...oldItems];
     const seen = new Set<string>();
     const merged: LeaderItem[] = [];
 
     for (const it of mergedAll) {
-      const k = `${it.symbol}|${it.publishedAt}|${it.headline.trim().toLowerCase()}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
+      const kk = `${it.symbol}|${it.publishedAt}|${it.headline.trim().toLowerCase()}`;
+      if (seen.has(kk)) continue;
+      seen.add(kk);
       merged.push(it);
       if (merged.length >= MAX_POOL_ITEMS) break;
     }
 
     const payload = { asOf: new Date().toISOString(), items: merged };
-
     await kv.set("pool:v1", payload);
     await kv.set("symbols:cursor", nextCursor);
 
     return NextResponse.json(
-      { ok: true, scanned: batch, added: newItems.length, cursor, nextCursor, poolSize: merged.length },
+      { ok: true, scanned: batch, added: newItems.length, aiUsed, cursor, nextCursor, poolSize: merged.length },
       { status: 200 }
     );
   } catch (e: any) {

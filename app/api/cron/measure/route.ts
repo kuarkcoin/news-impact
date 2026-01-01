@@ -12,7 +12,7 @@ const CRON_SECRET = process.env.CRON_SECRET;
 // =========================
 const MEASURE_MIN_SCORE = 75;        // sadece yüksek skorlar ölçülsün
 const MEASURE_MAX_ITEMS = 25;        // her çalışmada en fazla 25 haber ölç
-const MIN_AGE_HOURS = 20;            // ölçüm için haber en az ~20 saat yaşlı olsun
+const MIN_AGE_HOURS = 20;            // haber en az ~20 saat yaşlı olsun
 const CANDLE_LOOKBACK_DAYS = 120;    // candle aralığı
 
 type LeaderItem = {
@@ -33,23 +33,57 @@ type LeaderItem = {
   confidence: number;
   tooEarly: boolean;
 
-  // opsiyonel alanlar (KV içinde tutabiliriz)
   measuredAt?: string | null;
 };
 
 type PoolPayload = { asOf: string; items: LeaderItem[] };
 
+type Metrics = {
+  updatedAt: string;
+
+  totalMeasured: number;
+
+  directionCorrect: number;
+  directionAccuracy: number; // 0..100
+
+  sumAbsError: number;
+  avgAbsError: number;
+
+  highScoreCount: number;
+  highScoreHits: number;
+  highScoreHitRate: number; // 0..100
+};
+
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
+function emptyMetrics(): Metrics {
+  return {
+    updatedAt: new Date().toISOString(),
+    totalMeasured: 0,
+
+    directionCorrect: 0,
+    directionAccuracy: 0,
+
+    sumAbsError: 0,
+    avgAbsError: 0,
+
+    highScoreCount: 0,
+    highScoreHits: 0,
+    highScoreHitRate: 0
+  };
+}
+
 function assertCronAuth(req: Request) {
-  if (!CRON_SECRET) return false;
+  const secret = CRON_SECRET;
+  if (!secret) return false;
 
+  // 1) Query secret
   const { searchParams } = new URL(req.url);
-  const qs = searchParams.get("secret");
-  if (qs && qs === CRON_SECRET) return true;
+  if (searchParams.get("secret") === secret) return true;
 
+  // 2) Header bearer
   const authHeader = req.headers.get("authorization");
-  if (authHeader === `Bearer ${CRON_SECRET}`) return true;
+  if (authHeader === `Bearer ${secret}`) return true;
 
   return false;
 }
@@ -133,7 +167,6 @@ function calcConfidence(ret1d: number | null, ret5d: number | null) {
 }
 
 function rebuildLeaderboard(items: LeaderItem[]) {
-  // tek sembol = en iyi skor
   const bestBySymbol = new Map<string, LeaderItem>();
   for (const it of items) {
     const prev = bestBySymbol.get(it.symbol);
@@ -143,6 +176,40 @@ function rebuildLeaderboard(items: LeaderItem[]) {
   return Array.from(bestBySymbol.values())
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
     .slice(0, 120);
+}
+
+// ===== Metrics update helpers =====
+function isPositiveImpact(x: number) {
+  // basit eşik: 65+ pozitif etki
+  return x >= 65;
+}
+
+function updateMetrics(m: Metrics, expectedImpact: number, realizedImpact: number, finalScore: number) {
+  // 1) total measured
+  m.totalMeasured += 1;
+
+  // 2) direction accuracy
+  const expPos = isPositiveImpact(expectedImpact);
+  const realPos = isPositiveImpact(realizedImpact);
+  if (expPos === realPos) m.directionCorrect += 1;
+
+  // 3) abs error
+  const absErr = Math.abs(expectedImpact - realizedImpact);
+  m.sumAbsError += absErr;
+
+  // 4) high-score hit rate
+  if (finalScore >= 80) {
+    m.highScoreCount += 1;
+    if (realizedImpact >= 70) m.highScoreHits += 1;
+  }
+
+  // recompute derived
+  m.directionAccuracy = m.totalMeasured ? Math.round((m.directionCorrect / m.totalMeasured) * 100) : 0;
+  m.avgAbsError = m.totalMeasured ? Math.round((m.sumAbsError / m.totalMeasured) * 10) / 10 : 0;
+
+  m.highScoreHitRate = m.highScoreCount ? Math.round((m.highScoreHits / m.highScoreCount) * 100) : 0;
+
+  m.updatedAt = new Date().toISOString();
 }
 
 export async function GET(req: Request) {
@@ -188,7 +255,7 @@ export async function GET(req: Request) {
         const ageHours = (nowMs - t) / (1000 * 60 * 60);
         return ageHours >= MIN_AGE_HOURS;
       })
-      .filter((x) => !x.measuredAt) // sadece 1 kez ölç
+      .filter((x) => !x.measuredAt)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, MEASURE_MAX_ITEMS);
 
@@ -196,13 +263,16 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, measured: 0, note: "no eligible items" }, { status: 200 });
     }
 
+    // load metrics
+    const metricsRaw = (await kv.get("metrics:v1")) as Metrics | null;
+    const metrics: Metrics = metricsRaw ?? emptyMetrics();
+
     // symbol -> candle cache (bu run için)
     const candleCache = new Map<string, { t: number[]; c: number[] } | null>();
 
     const toUnix = Math.floor(Date.now() / 1000);
     const fromUnix = Math.floor(toUnix - CANDLE_LOOKBACK_DAYS * 24 * 3600);
 
-    // hızlı lookup için index: (symbol|publishedAt|headlineLower)
     const keyOf = (it: LeaderItem) =>
       `${it.symbol}|${it.publishedAt}|${(it.headline || "").trim().toLowerCase()}`;
 
@@ -239,10 +309,10 @@ export async function GET(req: Request) {
 
       const confidence = calcConfidence(ret1d, ret5d);
 
-      // skor: realized ağırlıklı + expected
       const expected = allItems[idxInAll].expectedImpact ?? it.expectedImpact ?? 65;
       const combined = clamp(Math.round(realizedImpact * 0.7 + expected * 0.3), 50, 100);
 
+      // update item
       const updated: LeaderItem = {
         ...allItems[idxInAll],
         ret1d,
@@ -255,6 +325,10 @@ export async function GET(req: Request) {
       };
 
       allItems[idxInAll] = updated;
+
+      // update metrics
+      updateMetrics(metrics, expected, realizedImpact, combined);
+
       measuredCount++;
     }
 
@@ -262,16 +336,18 @@ export async function GET(req: Request) {
     const poolPayload: PoolPayload = { asOf: new Date().toISOString(), items: allItems };
     await kv.set("pool:v1", poolPayload);
 
-    // leaderboard güncelle
     const leaderboard = rebuildLeaderboard(allItems);
     await kv.set("leaderboard:v1", { asOf: new Date().toISOString(), items: leaderboard });
+
+    await kv.set("metrics:v1", metrics);
 
     return NextResponse.json(
       {
         ok: true,
         measured: measuredCount,
         candidates: candidates.length,
-        uniqueSymbolsFetched: candleCache.size
+        uniqueSymbolsFetched: candleCache.size,
+        metrics
       },
       { status: 200 }
     );

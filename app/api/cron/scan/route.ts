@@ -251,7 +251,7 @@ function technicalContextAt(c: number[], idx: number) {
 }
 
 async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number): Promise<CandleData | null> {
-  const key = `candles:D:${symbol}`;
+  const key = `candles:D:${symbol}:lb=${CANDLE_LOOKBACK_DAYS}`;
   try {
     const cached = (await kv.get(key)) as CandleData | null;
     if (cached?.t?.length && cached?.c?.length) return cached;

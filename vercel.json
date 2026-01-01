@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/scan?secret=3f758834753a61bd10092ee6966155778fea0c0f5b992d62",
       "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/measure?secret=3f758834753a61bd10092ee6966155778fea0c0f5b992d62",
+      "schedule": "15 */6 * * *"
     }
   ]
 }

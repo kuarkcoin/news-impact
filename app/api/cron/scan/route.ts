@@ -10,11 +10,11 @@ const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 // =========================
 // SETTINGS (Finnhub Free-safe)
 // =========================
-const BATCH_SIZE = 6;                 // ✅ Free için daha güvenli
-const PER_SYMBOL = 2;                 // her sembolden max kaç haber alalım
-const MAX_POOL_ITEMS = 600;           // KV pool limiti
-const MAX_NEWS_AGE_DAYS = 10;         // eski haberleri kes
-const CANDLE_LOOKBACK_DAYS = 260;     // 200MA için güvenli (en az 200+)
+const BATCH_SIZE = 6;
+const PER_SYMBOL = 2;
+const MAX_POOL_ITEMS = 600;
+const MAX_NEWS_AGE_DAYS = 10;
+const CANDLE_LOOKBACK_DAYS = 260;
 const CANDLE_CACHE_TTL_SEC = 6 * 60 * 60; // 6 saat
 
 // =========================
@@ -30,7 +30,7 @@ const DEFAULT_UNIVERSE: string[] = [
 // =========================
 const BULLISH_KEYWORDS = [
   "beat","record","jump","soar","surge","approve","launch","partnership","buyback","dividend","upgrade","growth",
-  "raises","raise","strong","profit","wins","contract","guidance","earnings"
+  "raises","raise","strong","profit","wins","contract","guidance","earnings","eps"
 ];
 const BEARISH_KEYWORDS = [
   "miss","fail","drop","fall","plunge","sue","lawsuit","investigation","downgrade","cut","weak","loss","ban",
@@ -56,7 +56,6 @@ type LeaderItem = {
   confidence: number;
   tooEarly: boolean;
 
-  // ✅ NEW
   technicalContext: string | null;
 };
 
@@ -153,7 +152,7 @@ function sentimentFromHeadline(headline: string) {
     s = Math.round(s * 0.65);
   }
 
-  if (text.includes("earnings") || text.includes("guidance")) s += 10;
+  if (text.includes("earnings") || text.includes("guidance") || text.includes("eps")) s += 10;
 
   return clamp(s, -30, 30);
 }
@@ -199,7 +198,7 @@ function calcConfidence(ret1d: number | null, ret5d: number | null, pricedIn: bo
 }
 
 // =========================
-// TECHNICAL CONTEXT
+// TECHNICAL CONTEXT (trend/momentum/levels) - sende vardı, aynen kullan
 // =========================
 function smaAt(closes: number[], idx: number, period: number) {
   const start = idx - period + 1;
@@ -208,27 +207,18 @@ function smaAt(closes: number[], idx: number, period: number) {
   for (let i = start; i <= idx; i++) sum += closes[i];
   return sum / period;
 }
-
 function minAt(closes: number[], idx: number, lookback: number) {
   const start = Math.max(0, idx - lookback + 1);
   let m = Infinity;
   for (let i = start; i <= idx; i++) m = Math.min(m, closes[i]);
   return Number.isFinite(m) ? m : null;
 }
-
 function maxAt(closes: number[], idx: number, lookback: number) {
   const start = Math.max(0, idx - lookback + 1);
   let m = -Infinity;
   for (let i = start; i <= idx; i++) m = Math.max(m, closes[i]);
   return Number.isFinite(m) ? m : null;
 }
-
-/**
- * Basit teknik bağlam:
- * - Trend: price/MA50/MA200
- * - Momentum: 10g return büyükse
- * - Near support/resistance: 20g min/max'a yakınsa
- */
 function technicalContextAt(c: number[], idx: number) {
   if (!c?.length || idx < 0 || idx >= c.length) return null;
 
@@ -242,7 +232,6 @@ function technicalContextAt(c: number[], idx: number) {
     else if (price < ma50 && ma50 < ma200) trend = "📉 Downtrend";
     else trend = "🟨 Range";
   } else if (ma50 !== null) {
-    // fallback: MA200 yoksa MA50'ye göre
     trend = price >= ma50 ? "📈 Uptrend" : "📉 Downtrend";
   }
 
@@ -254,8 +243,8 @@ function technicalContextAt(c: number[], idx: number) {
 
   const sup = minAt(c, idx, 20);
   const res = maxAt(c, idx, 20);
-
   let levelTag: string | null = null;
+
   if (sup !== null) {
     const dist = (price - sup) / price;
     if (dist <= 0.02) levelTag = "🧲 Near support";
@@ -269,11 +258,51 @@ function technicalContextAt(c: number[], idx: number) {
   return parts.join(" · ");
 }
 
+// ✅ NEW: text/catalyst + pre-news context birleştiren builder
+function buildTechnicalContext(opts: {
+  retPre5: number | null;
+  baseTech: string | null;
+  category?: string | null;
+  headline?: string | null;
+}) {
+  const { retPre5, baseTech, category, headline } = opts;
+  const parts: string[] = [];
+
+  // 1) candle’dan gelen trend/momentum/support (varsa)
+  if (baseTech) parts.push(baseTech);
+
+  // 2) pre-news 5g hareket (fallback + ekstra anlam)
+  if (typeof retPre5 === "number") {
+    if (retPre5 > 0.12) parts.push("🚀 Strong pre-news run-up");
+    else if (retPre5 > 0.06) parts.push("📈 Moderate pre-news rally");
+    else if (retPre5 < -0.10) parts.push("🧨 Sharp pre-news sell-off");
+    else if (retPre5 < -0.05) parts.push("📉 Pre-news weakness");
+    else if (Math.abs(retPre5) < 0.02) parts.push("🟨 Sideways consolidation");
+  }
+
+  // 3) catalyst (category + headline ipuçları)
+  const cat = (category || "").toLowerCase();
+  const hl = (headline || "").toLowerCase();
+
+  if (cat.includes("earn") || hl.includes("earnings") || hl.includes("eps")) {
+    parts.push("🧾 Earnings catalyst");
+  } else if (cat.includes("upgrade") || hl.includes("upgrade")) {
+    parts.push("📣 Analyst upgrade");
+  } else if (cat.includes("downgrade") || hl.includes("downgrade")) {
+    parts.push("⚠️ Analyst downgrade");
+  } else if (cat.includes("launch") || hl.includes("launch") || hl.includes("unveil")) {
+    parts.push("🧪 Product launch");
+  }
+
+  // fallback
+  if (!parts.length) return "General news event";
+  return parts.join(" + ");
+}
+
 // =========================
 // CANDLES (KV cached)
 // =========================
 async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number): Promise<CandleData | null> {
-  // ✅ cache key'i lookback'e bağladık (daha doğru)
   const key = `candles:D:${symbol}:lb=${CANDLE_LOOKBACK_DAYS}`;
 
   try {
@@ -344,7 +373,8 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     let ret1d: number | null = null;
     let ret5d: number | null = null;
     let retPre5: number | null = null;
-    let tech: string | null = null;
+
+    let baseTech: string | null = null;
 
     if (candles?.t?.length && candles?.c?.length) {
       const idx = findLastLE(candles.t, Number(n.datetime));
@@ -355,7 +385,7 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
         if (idx + 5 < candles.c.length) ret5d = (candles.c[idx + 5] - base) / base;
         if (idx - 5 >= 0) retPre5 = (base - candles.c[idx - 5]) / candles.c[idx - 5];
 
-        tech = technicalContextAt(candles.c, idx);
+        baseTech = technicalContextAt(candles.c, idx);
       }
     }
 
@@ -364,6 +394,14 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     const score = combineScore(exp.expectedImpact, realizedImpact, exp.pricedIn);
     const confidence = calcConfidence(ret1d, ret5d, exp.pricedIn);
     const tooEarly = realizedImpact === null;
+
+    // ✅ technicalContext GARANTİ
+    const technicalContext = buildTechnicalContext({
+      retPre5,
+      baseTech,
+      category: n.category ?? null,
+      headline: String(n.headline),
+    });
 
     items.push({
       symbol,
@@ -383,7 +421,7 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
       confidence,
       tooEarly,
 
-      technicalContext: tech
+      technicalContext,
     });
 
     if (items.length >= PER_SYMBOL) break;
@@ -407,7 +445,7 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
 
-    // ✅ debug/reset: /api/cron/scan?secret=...&reset=1
+    // ✅ reset
     if (searchParams.get("reset") === "1") {
       await kv.del("pool:v1");
       await kv.del("symbols:cursor");
@@ -434,10 +472,11 @@ export async function GET(req: Request) {
     const poolRaw = (await kv.get("pool:v1")) as { asOf: string; items: LeaderItem[] } | null;
     const oldItems = poolRaw?.items || [];
 
-    // ✅ de-dup (symbol+headline+publishedAt)
+    // de-dup
     const mergedAll = [...newItems, ...oldItems];
     const seen = new Set<string>();
     const merged: LeaderItem[] = [];
+
     for (const it of mergedAll) {
       const k = `${it.symbol}|${it.publishedAt}|${it.headline.trim().toLowerCase()}`;
       if (seen.has(k)) continue;
@@ -452,22 +491,12 @@ export async function GET(req: Request) {
     await kv.set("symbols:cursor", nextCursor);
 
     return NextResponse.json(
-      {
-        ok: true,
-        scanned: batch,
-        added: newItems.length,
-        cursor,
-        nextCursor,
-        poolSize: merged.length
-      },
+      { ok: true, scanned: batch, added: newItems.length, cursor, nextCursor, poolSize: merged.length },
       { status: 200 }
     );
   } catch (e: any) {
     if (String(e?.message || "").includes("429")) {
-      return NextResponse.json(
-        { error: "Rate limit exceeded – please try again later" },
-        { status: 429 }
-      );
+      return NextResponse.json({ error: "Rate limit exceeded – please try again later" }, { status: 429 });
     }
     return NextResponse.json({ error: e?.message || "Unknown error" }, { status: 500 });
   }

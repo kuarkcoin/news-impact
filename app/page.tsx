@@ -3,6 +3,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 
+type Dir = -1 | 0 | 1;
+
 type LeaderItem = {
   symbol: string;
   headline: string;
@@ -21,6 +23,14 @@ type LeaderItem = {
   score: number;          // 50..100
   confidence: number;     // 0..100
   tooEarly: boolean;      // true => ⚠️
+
+  // ✅ NEW (scan tarafında ekledik)
+  expectedDir?: Dir;
+  realizedDir?: Dir;
+  rsi14?: number | null;
+  breakout20?: boolean | null;
+  bullTrap?: boolean | null;
+  volumeSpike?: boolean | null;
 
   technicalContext: string | null;
 };
@@ -75,6 +85,27 @@ function pricedInText(v: boolean | null | undefined) {
   return { txt: '—', cls: 'bg-white/5 text-slate-200 border-white/10' };
 }
 
+function dirPill(d?: Dir) {
+  if (d === 1) return { txt: '▲ Bull', cls: 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20' };
+  if (d === -1) return { txt: '▼ Bear', cls: 'bg-red-500/10 text-red-200 border-red-500/20' };
+  return { txt: '■ Flat', cls: 'bg-white/5 text-slate-200 border-white/10' };
+}
+
+function signalsPills(it: LeaderItem) {
+  const pills: { txt: string; cls: string }[] = [];
+  if (it.breakout20) pills.push({ txt: '🚪 20D breakout', cls: 'bg-sky-500/10 text-sky-200 border-sky-500/20' });
+  if (it.volumeSpike) pills.push({ txt: '📊 High vol', cls: 'bg-amber-500/10 text-amber-200 border-amber-500/20' });
+  if (it.bullTrap) pills.push({ txt: '🪤 Trap risk', cls: 'bg-red-500/10 text-red-200 border-red-500/20' });
+
+  if (typeof it.rsi14 === 'number') {
+    if (it.rsi14 >= 70) pills.push({ txt: `🟥 RSI ${it.rsi14.toFixed(0)}`, cls: 'bg-red-500/10 text-red-200 border-red-500/20' });
+    else if (it.rsi14 <= 30) pills.push({ txt: `🟩 RSI ${it.rsi14.toFixed(0)}`, cls: 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20' });
+    else pills.push({ txt: `🟦 RSI ${it.rsi14.toFixed(0)}`, cls: 'bg-white/5 text-slate-200 border-white/10' });
+  }
+
+  return pills.slice(0, 3); // fazla uzamasın
+}
+
 function ProgressBar({ value, className = '' }: { value: number; className?: string }) {
   const clamped = clamp(value ?? 0, 0, 100);
   return (
@@ -119,7 +150,6 @@ export default function HomePage() {
   const [minScore, setMinScore] = useState(50);
   const [sortBy, setSortBy] = useState<'score' | 'newest' | 'confidence'>('score');
 
-  // Fetch leaderboard
   useEffect(() => {
     const controller = new AbortController();
 
@@ -150,7 +180,6 @@ export default function HomePage() {
     return () => controller.abort();
   }, [minScore]);
 
-  // Fetch metrics once (optional)
   useEffect(() => {
     const controller = new AbortController();
 
@@ -160,9 +189,7 @@ export default function HomePage() {
         if (!res.ok) return;
         const json = (await res.json()) as Metrics;
         setMetrics(json);
-      } catch (e: any) {
-        // sessiz geç
-      }
+      } catch {}
     })();
 
     return () => controller.abort();
@@ -326,6 +353,135 @@ export default function HomePage() {
 
           {/* content */}
           <div className="px-5 md:px-6 pb-6">
+            {!loading && !err && items.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-slate-300">
+                    <tr className="border-b border-white/10">
+                      <th className="text-left py-3 pr-3">#</th>
+                      <th className="text-left py-3 pr-3">Ticker</th>
+                      <th className="text-left py-3 pr-3">Headline</th>
+                      <th className="text-left py-3 pr-3">Score</th>
+                      <th className="text-left py-3 pr-3">Dir</th>
+                      <th className="text-left py-3 pr-3">Signals</th>
+                      <th className="text-left py-3 pr-3">Expected</th>
+                      <th className="text-left py-3 pr-3">Realized</th>
+                      <th className="text-left py-3 pr-3">Conf</th>
+                      <th className="text-left py-3 pr-3">Tech</th>
+                      <th className="text-left py-3 pr-3">⚠️</th>
+                      <th className="text-left py-3 pr-3">+1D</th>
+                      <th className="text-left py-3 pr-3">+5D</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {items.map((it, idx) => {
+                      const ed = dirPill(it.expectedDir);
+                      const rd = dirPill(it.realizedDir);
+                      const sigs = signalsPills(it);
+
+                      return (
+                        <tr key={`${it.symbol}-${it.publishedAt}-${idx}`} className="border-b border-white/5">
+                          <td className="py-4 pr-3 text-slate-400">{idx + 1}</td>
+
+                          <td className="py-4 pr-3">
+                            <Link
+                              href={`/ticker/${encodeURIComponent(it.symbol)}`}
+                              className="font-black text-emerald-300 hover:underline"
+                            >
+                              {it.symbol}
+                            </Link>
+                          </td>
+
+                          <td className="py-4 pr-3 min-w-[360px]">
+                            <div className="font-semibold text-white/90">{it.headline}</div>
+                            <div className="text-[11px] text-slate-400 mt-1">
+                              {fmtDate(it.publishedAt)}
+                              {it.url ? (
+                                <>
+                                  {' '}
+                                  ·{' '}
+                                  <a
+                                    href={it.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-slate-300 hover:underline"
+                                  >
+                                    source
+                                  </a>
+                                </>
+                              ) : null}
+                            </div>
+                          </td>
+
+                          <td className="py-4 pr-3">
+                            <span
+                              className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${badgeScore(
+                                it.score
+                              )}`}
+                            >
+                              {it.score}
+                            </span>
+                          </td>
+
+                          {/* ✅ Dir */}
+                          <td className="py-4 pr-3">
+                            <div className="flex flex-col gap-1">
+                              <span className={`inline-flex w-fit px-2 py-1 rounded-full text-[11px] font-black border ${ed.cls}`}>
+                                E {ed.txt}
+                              </span>
+                              <span className={`inline-flex w-fit px-2 py-1 rounded-full text-[11px] font-black border ${rd.cls}`}>
+                                R {rd.txt}
+                              </span>
+                            </div>
+                          </td>
+
+                          {/* ✅ Signals */}
+                          <td className="py-4 pr-3 min-w-[220px]">
+                            <div className="flex flex-wrap gap-1">
+                              {sigs.length ? (
+                                sigs.map((p, i) => (
+                                  <span key={i} className={`inline-flex px-2 py-1 rounded-full text-[11px] font-black border ${p.cls}`}>
+                                    {p.txt}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="py-4 pr-3 text-slate-200">{it.expectedImpact}</td>
+                          <td className="py-4 pr-3 text-slate-200">{it.realizedImpact}</td>
+
+                          <td className="py-4 pr-3">
+                            <div className="w-28">
+                              <ProgressBar value={it.confidence ?? 0} />
+                            </div>
+                          </td>
+
+                          <td className="py-4 pr-3 text-slate-200 min-w-[220px]">{it.technicalContext ?? '—'}</td>
+
+                          <td className="py-4 pr-3">
+                            {it.tooEarly ? (
+                              <span className="text-[11px] font-black px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-200">
+                                ⚠️
+                              </span>
+                            ) : (
+                              <span className="text-slate-600">—</span>
+                            )}
+                          </td>
+
+                          <td className="py-4 pr-3 text-slate-200">{fmtPct(it.ret1d)}</td>
+                          <td className="py-4 pr-3 text-slate-200">{fmtPct(it.ret5d)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
             {loading && (
               <div className="py-10 text-center text-slate-300">
                 <div className="inline-block w-10 h-10 border-4 border-white/10 border-t-emerald-400 rounded-full animate-spin" />
@@ -344,105 +500,11 @@ export default function HomePage() {
               <div className="py-10 text-center text-slate-300">No items. (Cron henüz çalışmamış olabilir)</div>
             )}
 
-            {!loading && !err && items.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="text-slate-300">
-                    <tr className="border-b border-white/10">
-                      <th className="text-left py-3 pr-3">#</th>
-                      <th className="text-left py-3 pr-3">Ticker</th>
-                      <th className="text-left py-3 pr-3">Headline</th>
-                      <th className="text-left py-3 pr-3">Score</th>
-                      <th className="text-left py-3 pr-3">Expected</th>
-                      <th className="text-left py-3 pr-3">Realized</th>
-                      <th className="text-left py-3 pr-3">Conf</th>
-                      <th className="text-left py-3 pr-3">Tech</th>
-                      <th className="text-left py-3 pr-3">⚠️</th>
-                      <th className="text-left py-3 pr-3">+1D</th>
-                      <th className="text-left py-3 pr-3">+5D</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {items.map((it, idx) => (
-                      <tr key={`${it.symbol}-${it.publishedAt}-${idx}`} className="border-b border-white/5">
-                        <td className="py-4 pr-3 text-slate-400">{idx + 1}</td>
-
-                        <td className="py-4 pr-3">
-                          <Link
-                            href={`/ticker/${encodeURIComponent(it.symbol)}`}
-                            className="font-black text-emerald-300 hover:underline"
-                          >
-                            {it.symbol}
-                          </Link>
-                        </td>
-
-                        <td className="py-4 pr-3 min-w-[360px]">
-                          <div className="font-semibold text-white/90">{it.headline}</div>
-                          <div className="text-[11px] text-slate-400 mt-1">
-                            {fmtDate(it.publishedAt)}
-                            {it.url ? (
-                              <>
-                                {' '}
-                                ·{' '}
-                                <a
-                                  href={it.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-slate-300 hover:underline"
-                                >
-                                  source
-                                </a>
-                              </>
-                            ) : null}
-                          </div>
-                        </td>
-
-                        <td className="py-4 pr-3">
-                          <span
-                            className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${badgeScore(
-                              it.score
-                            )}`}
-                          >
-                            {it.score}
-                          </span>
-                        </td>
-
-                        <td className="py-4 pr-3 text-slate-200">{it.expectedImpact}</td>
-                        <td className="py-4 pr-3 text-slate-200">{it.realizedImpact}</td>
-
-                        <td className="py-4 pr-3">
-                          <div className="w-28">
-                            <ProgressBar value={it.confidence ?? 0} />
-                          </div>
-                        </td>
-
-                        <td className="py-4 pr-3 text-slate-200 min-w-[220px]">{it.technicalContext ?? '—'}</td>
-
-                        <td className="py-4 pr-3">
-                          {it.tooEarly ? (
-                            <span className="text-[11px] font-black px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-200">
-                              ⚠️
-                            </span>
-                          ) : (
-                            <span className="text-slate-600">—</span>
-                          )}
-                        </td>
-
-                        <td className="py-4 pr-3 text-slate-200">{fmtPct(it.ret1d)}</td>
-                        <td className="py-4 pr-3 text-slate-200">{fmtPct(it.ret5d)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
             <div className="mt-6 rounded-2xl bg-slate-900/50 border border-white/10 p-4 text-slate-200">
               <div className="font-black">Interpretation</div>
               <div className="text-sm text-slate-300 mt-1">
-                <b>Expected</b> is text+priced-in estimate. <b>Realized</b> is actual move strength (when +1D/+5D
-                available). <b>Confidence</b> rises when +1D and +5D exist; “⚠️” means it’s too early to judge.
+                <b>Expected</b> is text+priced-in estimate. <b>Realized</b> is actual move strength (when +1D/+5D available).
+                <b>Dir</b> compares expected vs realized direction. <b>Signals</b> shows RSI/breakout/volume/trap tags around the news date.
               </div>
             </div>
           </div>
@@ -458,6 +520,7 @@ export default function HomePage() {
 
 function TopCard({ it }: { it: LeaderItem }) {
   const p = pricedInText(it.pricedIn);
+  const sigs = signalsPills(it);
 
   return (
     <a
@@ -497,6 +560,16 @@ function TopCard({ it }: { it: LeaderItem }) {
 
       {it.technicalContext ? (
         <div className="mt-2 text-xs text-slate-400 italic line-clamp-2">{it.technicalContext}</div>
+      ) : null}
+
+      {sigs.length ? (
+        <div className="mt-3 flex flex-wrap gap-1">
+          {sigs.map((x, i) => (
+            <span key={i} className={`inline-flex px-2 py-1 rounded-full text-[11px] font-black border ${x.cls}`}>
+              {x.txt}
+            </span>
+          ))}
+        </div>
       ) : null}
 
       <div className="mt-4 grid grid-cols-2 gap-3">

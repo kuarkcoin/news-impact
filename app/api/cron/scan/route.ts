@@ -422,10 +422,6 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "No FINNHUB_API_KEY" }, { status: 500 });
   }
 
-  if (!assertCronAuth(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   try {
     const { searchParams } = new URL(req.url);
 

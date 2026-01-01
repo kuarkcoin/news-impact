@@ -21,6 +21,7 @@ type LeaderItem = {
   score: number;          // 50..100
   confidence: number;     // 0..100
   tooEarly: boolean;      // true => ⚠️
+  technicalContext: string | null;
 };
 
 type ApiResp = { asOf: string; items: LeaderItem[] };

@@ -42,13 +42,20 @@ export async function GET(req: Request) {
 
     const data = (await kv.get("leaderboard:v1")) as Payload | null;
 
-    const items = (data?.items || [])
+    if (!data || !Array.isArray(data.items) || data.items.length === 0) {
+      return NextResponse.json({ asOf: new Date().toISOString(), items: [] }, { status: 200 });
+    }
+
+    const items = data.items
       .filter((x) => (x.score ?? 0) >= min)
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, limit);
 
-    return NextResponse.json({ asOf: data?.asOf || new Date().toISOString(), items }, { status: 200 });
+    return NextResponse.json({ asOf: data.asOf || new Date().toISOString(), items }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Veri okunamadı", items: [] }, { status: 500 });
+    return NextResponse.json(
+      { error: e?.message || "Veri okunamadı", items: [] },
+      { status: 500 }
+    );
   }
 }

@@ -395,6 +395,26 @@ export default function HomePage() {
 
                           <td className="py-4 pr-3 min-w-[360px]">
                             <div className="font-semibold text-white/90">{it.headline}</div>
+{/* ✅ AI Yorum (Gemini) */}
+{(it as any).aiSummary ? (
+  <div className="mt-2 rounded-2xl bg-white/5 border border-white/10 p-3">
+    <div className="text-[11px] font-black text-emerald-200">
+      🤖 AI Comment {(it as any).aiSentiment ? `• ${(it as any).aiSentiment}` : ''}
+    </div>
+
+    <div className="text-sm text-slate-200 mt-1">
+      {(it as any).aiSummary}
+    </div>
+
+    {Array.isArray((it as any).aiBullets) && (it as any).aiBullets.length > 0 ? (
+      <ul className="mt-2 space-y-1 text-[12px] text-slate-300 list-disc pl-5">
+        {(it as any).aiBullets.slice(0, 5).map((b: string, i: number) => (
+          <li key={i}>{b}</li>
+        ))}
+      </ul>
+    ) : null}
+  </div>
+) : null}
                             <div className="text-[11px] text-slate-400 mt-1">
                               {fmtDate(it.publishedAt)}
                               {it.url ? (

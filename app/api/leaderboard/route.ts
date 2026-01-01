@@ -41,13 +41,8 @@ export async function GET(req: Request) {
   const min = clamp(safeInt(searchParams.get("min"), 50), 30, 100);
   const limit = clamp(safeInt(searchParams.get("limit"), 50), 10, 200);
 
-  // opsiyonel: sort (UI ile uyumlu)
   const sort = (searchParams.get("sort") || "score") as "score" | "newest" | "confidence";
-
-  // opsiyonel: server-side search
   const q = (searchParams.get("q") || "").trim().toLowerCase();
-
-  // opsiyonel: debug
   const debug = searchParams.get("debug") === "1";
 
   try {
@@ -62,10 +57,10 @@ export async function GET(req: Request) {
 
     let items = data.items;
 
-    // q filtresi (istersen frontend’e bırak, ama destekli)
+    // ✅ q filtresi: technicalContext dahil
     if (q) {
       items = items.filter((it) => {
-        const blob = `${it.symbol} ${it.headline} ${it.type || ""}`.toLowerCase();
+        const blob = `${it.symbol} ${it.headline} ${it.type || ""} ${it.technicalContext || ""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -75,12 +70,8 @@ export async function GET(req: Request) {
 
     // sort
     items = [...items].sort((a, b) => {
-      if (sort === "newest") {
-        return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
-      }
-      if (sort === "confidence") {
-        return (b.confidence ?? 0) - (a.confidence ?? 0);
-      }
+      if (sort === "newest") return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+      if (sort === "confidence") return (b.confidence ?? 0) - (a.confidence ?? 0);
       return (b.score ?? 0) - (a.score ?? 0);
     });
 
@@ -92,13 +83,16 @@ export async function GET(req: Request) {
       { status: 200 }
     );
   } catch (e: any) {
-    // debug=1 ise gerçek hatayı dön (prod’da kapalı)
     if (debug) {
       return NextResponse.json(
         { error: "KV read failed", detail: String(e?.message || e) },
         { status: 500 }
       );
     }
-    return NextResponse.json({ asOf: new Date().toISOString(), items: [] }, { status: 200 });
+    // prod: sessiz degrade
+    return NextResponse.json(
+      { asOf: new Date().toISOString(), items: [] },
+      { status: 200 }
+    );
   }
 }

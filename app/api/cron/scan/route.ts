@@ -1,3 +1,4 @@
+// app/api/cron/scan/route.ts
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
 
@@ -6,28 +7,31 @@ export const maxDuration = 60;
 
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
-// Ayarlar
-const BATCH_SIZE = 10;
-const PER_SYMBOL = 2;
-const MAX_POOL_ITEMS = 600;
-const MAX_NEWS_AGE_DAYS = 10;
-
-// 200MA için en az 260 gün önerilir
-const CANDLE_LOOKBACK_DAYS = 260;
-
-// Candle KV cache (Finnhub free rate-limit için hayat kurtarır)
+// =========================
+// SETTINGS (Finnhub Free-safe)
+// =========================
+const BATCH_SIZE = 6;                 // ✅ Free için daha güvenli
+const PER_SYMBOL = 2;                 // her sembolden max kaç haber alalım
+const MAX_POOL_ITEMS = 600;           // KV pool limiti
+const MAX_NEWS_AGE_DAYS = 10;         // eski haberleri kes
+const CANDLE_LOOKBACK_DAYS = 260;     // 200MA için güvenli (en az 200+)
 const CANDLE_CACHE_TTL_SEC = 6 * 60 * 60; // 6 saat
 
+// =========================
+// UNIVERSE
+// =========================
 const DEFAULT_UNIVERSE: string[] = [
   "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD","AVGO","INTC","QCOM","TXN","MU","NFLX","ADBE","CRM",
   "PLTR","COIN","MSTR","UBER","SHOP","PYPL","ASML","AMAT","LRCX","KLAC","SNPS","CDNS","NOW","INTU","CSCO","ORCL"
 ];
 
+// =========================
+// SIMPLE NLP
+// =========================
 const BULLISH_KEYWORDS = [
   "beat","record","jump","soar","surge","approve","launch","partnership","buyback","dividend","upgrade","growth",
   "raises","raise","strong","profit","wins","contract","guidance","earnings"
 ];
-
 const BEARISH_KEYWORDS = [
   "miss","fail","drop","fall","plunge","sue","lawsuit","investigation","downgrade","cut","weak","loss","ban",
   "recall","resign","delay","lower","warning","sec","probe"
@@ -60,25 +64,32 @@ type CandleData = { t: number[]; c: number[] };
 
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
+// =========================
+// AUTH (Cron Secret)
+// =========================
 function assertCronAuth(req: Request) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
 
-  // 1) query ?secret=...
   const { searchParams } = new URL(req.url);
   if (searchParams.get("secret") === secret) return true;
 
-  // 2) header Authorization: Bearer <secret>
   const authHeader = req.headers.get("authorization");
   if (authHeader === `Bearer ${secret}`) return true;
 
   return false;
 }
 
+// =========================
+// BATCH cursor
+// =========================
 function pickBatch(universe: string[], cursor: number) {
   const batch: string[] = [];
-  for (let i = 0; i < BATCH_SIZE; i++) batch.push(universe[(cursor + i) % universe.length]);
-  const nextCursor = (cursor + BATCH_SIZE) % universe.length;
+  const u = universe.length ? universe : DEFAULT_UNIVERSE;
+
+  for (let i = 0; i < BATCH_SIZE; i++) batch.push(u[(cursor + i) % u.length]);
+  const nextCursor = (cursor + BATCH_SIZE) % u.length;
+
   return { batch, nextCursor };
 }
 
@@ -93,14 +104,17 @@ function findLastLE(times: number[], target: number) {
   return ans;
 }
 
+// =========================
+// FETCH with retry/backoff
+// =========================
 async function fetchWithRetry(url: string, maxRetries = 3) {
   let lastErr: any = null;
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const res = await fetch(url, { cache: "no-store" });
 
       if (res.status === 429) {
-        // basit backoff
         const wait = attempt === 0 ? 800 : attempt === 1 ? 1600 : 2600;
         await new Promise((r) => setTimeout(r, wait));
         lastErr = new Error("429");
@@ -121,9 +135,13 @@ async function fetchWithRetry(url: string, maxRetries = 3) {
       await new Promise((r) => setTimeout(r, wait));
     }
   }
+
   throw lastErr ?? new Error("fetch failed");
 }
 
+// =========================
+// SCORING
+// =========================
 function sentimentFromHeadline(headline: string) {
   const text = headline.toLowerCase();
   let s = 0;
@@ -131,12 +149,10 @@ function sentimentFromHeadline(headline: string) {
   for (const w of BULLISH_KEYWORDS) if (text.includes(w)) s += 15;
   for (const w of BEARISH_KEYWORDS) if (text.includes(w)) s -= 15;
 
-  // basit “but/despite/however” zayıflatma
   if (text.includes("but") || text.includes("despite") || text.includes("however")) {
     s = Math.round(s * 0.65);
   }
 
-  // earnings/guidance bonus
   if (text.includes("earnings") || text.includes("guidance")) s += 10;
 
   return clamp(s, -30, 30);
@@ -182,6 +198,9 @@ function calcConfidence(ret1d: number | null, ret5d: number | null, pricedIn: bo
   return clamp(c, 0, 100);
 }
 
+// =========================
+// TECHNICAL CONTEXT
+// =========================
 function smaAt(closes: number[], idx: number, period: number) {
   const start = idx - period + 1;
   if (start < 0) return null;
@@ -205,16 +224,15 @@ function maxAt(closes: number[], idx: number, lookback: number) {
 }
 
 /**
- * ✅ Basit teknik bağlam:
- * - Trend: Uptrend / Downtrend / Range
- * - Momentum: 10günlük hareket büyükse
- * - Near support/resistance: 20günlük min/max'a yakınsa
+ * Basit teknik bağlam:
+ * - Trend: price/MA50/MA200
+ * - Momentum: 10g return büyükse
+ * - Near support/resistance: 20g min/max'a yakınsa
  */
 function technicalContextAt(c: number[], idx: number) {
   if (!c?.length || idx < 0 || idx >= c.length) return null;
 
   const price = c[idx];
-
   const ma50 = smaAt(c, idx, 50);
   const ma200 = smaAt(c, idx, 200);
 
@@ -223,20 +241,21 @@ function technicalContextAt(c: number[], idx: number) {
     if (price > ma50 && ma50 > ma200) trend = "📈 Uptrend";
     else if (price < ma50 && ma50 < ma200) trend = "📉 Downtrend";
     else trend = "🟨 Range";
+  } else if (ma50 !== null) {
+    // fallback: MA200 yoksa MA50'ye göre
+    trend = price >= ma50 ? "📈 Uptrend" : "📉 Downtrend";
   }
 
-  // momentum: 10 günlük getiri (varsa)
   let momentumTag: string | null = null;
   if (idx - 10 >= 0) {
     const r10 = (price - c[idx - 10]) / c[idx - 10];
     if (Math.abs(r10) >= 0.06) momentumTag = "🔥 Momentum";
   }
 
-  // support / resistance: son 20 gün min/max'a yakınlık
   const sup = minAt(c, idx, 20);
   const res = maxAt(c, idx, 20);
-  let levelTag: string | null = null;
 
+  let levelTag: string | null = null;
   if (sup !== null) {
     const dist = (price - sup) / price;
     if (dist <= 0.02) levelTag = "🧲 Near support";
@@ -250,8 +269,13 @@ function technicalContextAt(c: number[], idx: number) {
   return parts.join(" · ");
 }
 
+// =========================
+// CANDLES (KV cached)
+// =========================
 async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number): Promise<CandleData | null> {
+  // ✅ cache key'i lookback'e bağladık (daha doğru)
   const key = `candles:D:${symbol}:lb=${CANDLE_LOOKBACK_DAYS}`;
+
   try {
     const cached = (await kv.get(key)) as CandleData | null;
     if (cached?.t?.length && cached?.c?.length) return cached;
@@ -270,7 +294,6 @@ async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number
 
     const payload: CandleData = { t: data.t as number[], c: data.c as number[] };
 
-    // cache yaz (fail olsa da sıkıntı değil)
     try { await kv.set(key, payload, { ex: CANDLE_CACHE_TTL_SEC }); } catch {}
 
     return payload;
@@ -279,12 +302,15 @@ async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number
   }
 }
 
+// =========================
+// PER-SYMBOL fetch
+// =========================
 async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   const now = new Date();
   const toUnix = Math.floor(now.getTime() / 1000);
   const fromUnix = Math.floor(toUnix - CANDLE_LOOKBACK_DAYS * 24 * 3600);
 
-  const newsFrom = new Date(now.getTime() - 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const newsFrom = new Date(now.getTime() - MAX_NEWS_AGE_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const newsTo = now.toISOString().slice(0, 10);
 
   const newsUrl =
@@ -300,7 +326,6 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   const news = await newsRes.json();
   if (!Array.isArray(news) || news.length === 0) return [];
 
-  // candles (cache’li)
   const candles = await getCandlesCached(symbol, fromUnix, toUnix);
 
   const items: LeaderItem[] = [];
@@ -309,7 +334,6 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   for (const n of news) {
     if (!n?.headline || !n?.datetime) continue;
 
-    // yaş filtresi
     const ageDays = (Date.now() - Number(n.datetime) * 1000) / (1000 * 60 * 60 * 24);
     if (ageDays > MAX_NEWS_AGE_DAYS) continue;
 
@@ -331,7 +355,6 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
         if (idx + 5 < candles.c.length) ret5d = (candles.c[idx + 5] - base) / base;
         if (idx - 5 >= 0) retPre5 = (base - candles.c[idx - 5]) / candles.c[idx - 5];
 
-        // ✅ teknik bağlamı haber zamanına göre üret
         tech = technicalContextAt(candles.c, idx);
       }
     }
@@ -369,6 +392,9 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   return items;
 }
 
+// =========================
+// MAIN
+// =========================
 export async function GET(req: Request) {
   if (!FINNHUB_API_KEY) {
     return NextResponse.json({ error: "No FINNHUB_API_KEY" }, { status: 500 });
@@ -379,6 +405,15 @@ export async function GET(req: Request) {
   }
 
   try {
+    const { searchParams } = new URL(req.url);
+
+    // ✅ debug/reset: /api/cron/scan?secret=...&reset=1
+    if (searchParams.get("reset") === "1") {
+      await kv.del("pool:v1");
+      await kv.del("symbols:cursor");
+      return NextResponse.json({ ok: true, reset: true }, { status: 200 });
+    }
+
     const universe = ((await kv.get("symbols:universe")) as string[] | null) ?? DEFAULT_UNIVERSE;
     const cursor = ((await kv.get("symbols:cursor")) as number | null) ?? 0;
 
@@ -391,7 +426,6 @@ export async function GET(req: Request) {
         const arr = await fetchSymbolItems(sym);
         newItems.push(...arr);
       } catch (e: any) {
-        // 429 ise “global” hata döndürelim (ürün davranışı)
         if (String(e?.message || "").includes("429")) throw e;
         console.error("symbol fetch error", sym, e);
       }
@@ -400,13 +434,34 @@ export async function GET(req: Request) {
     const poolRaw = (await kv.get("pool:v1")) as { asOf: string; items: LeaderItem[] } | null;
     const oldItems = poolRaw?.items || [];
 
-    // yeni başa, eski arkaya
-    const merged = [...newItems, ...oldItems].slice(0, MAX_POOL_ITEMS);
+    // ✅ de-dup (symbol+headline+publishedAt)
+    const mergedAll = [...newItems, ...oldItems];
+    const seen = new Set<string>();
+    const merged: LeaderItem[] = [];
+    for (const it of mergedAll) {
+      const k = `${it.symbol}|${it.publishedAt}|${it.headline.trim().toLowerCase()}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      merged.push(it);
+      if (merged.length >= MAX_POOL_ITEMS) break;
+    }
 
-    await kv.set("pool:v1", { asOf: new Date().toISOString(), items: merged });
+    const payload = { asOf: new Date().toISOString(), items: merged };
+
+    await kv.set("pool:v1", payload);
     await kv.set("symbols:cursor", nextCursor);
 
-    return NextResponse.json({ ok: true, scanned: batch, added: newItems.length }, { status: 200 });
+    return NextResponse.json(
+      {
+        ok: true,
+        scanned: batch,
+        added: newItems.length,
+        cursor,
+        nextCursor,
+        poolSize: merged.length
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     if (String(e?.message || "").includes("429")) {
       return NextResponse.json(

@@ -21,20 +21,12 @@ type LeaderItem = {
   score: number;          // 50..100
   confidence: number;     // 0..100
   tooEarly: boolean;      // true => ⚠️
-  technicalContext: string | null;
+
+  // ✅ backend’den geliyor (yoksa da sorun yok)
+  technicalContext?: string | null;
 };
 
 type ApiResp = { asOf: string; items: LeaderItem[] };
-
-// ✅ Accuracy metrics type (from /api/metrics)
-type Metrics = {
-  updatedAt: string;
-  totalMeasured: number;
-
-  directionAccuracy: number; // %
-  avgAbsError: number;       // pts
-  highScoreHitRate: number;  // %
-};
 
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
@@ -113,14 +105,11 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // ✅ Accuracy dashboard data
-  const [metrics, setMetrics] = useState<Metrics | null>(null);
-
   const [q, setQ] = useState('');
   const [minScore, setMinScore] = useState(50);
   const [sortBy, setSortBy] = useState<'score' | 'newest' | 'confidence'>('score');
 
-  // ✅ Fetch leaderboard (refresh yok)
+  // ✅ Fetch: refresh yok (cron+kv otomatik güncelliyor)
   useEffect(() => {
     const controller = new AbortController();
 
@@ -151,26 +140,6 @@ export default function HomePage() {
     return () => controller.abort();
   }, [minScore]);
 
-  // ✅ Fetch metrics once
-  useEffect(() => {
-    const controller = new AbortController();
-
-    (async () => {
-      try {
-        const res = await fetch('/api/metrics', { cache: 'no-store', signal: controller.signal });
-        if (!res.ok) return;
-        const json = (await res.json()) as Metrics;
-        setMetrics(json);
-      } catch (e: any) {
-        if (e?.name !== 'AbortError') {
-          // sessiz geç: metrics gelmezse UI bozulmasın
-        }
-      }
-    })();
-
-    return () => controller.abort();
-  }, []);
-
   const items = useMemo(() => {
     const list = data?.items || [];
     const qq = q.trim().toLowerCase();
@@ -178,7 +147,7 @@ export default function HomePage() {
     const searched = !qq
       ? list
       : list.filter((it) => {
-          const blob = `${it.symbol} ${it.headline} ${it.type || ''}`.toLowerCase();
+          const blob = `${it.symbol} ${it.headline} ${it.type || ''} ${it.technicalContext || ''}`.toLowerCase();
           return blob.includes(qq);
         });
 
@@ -219,28 +188,6 @@ export default function HomePage() {
             Each headline gets: <b>Expected</b> vs <b>Realized</b> impact, a <b>Confidence</b> score, and a warning if it’s <b>too early</b>.
           </p>
 
-          {/* ✅ Accuracy Dashboard (NEW) */}
-          <div className="rounded-3xl bg-white/5 border border-white/10 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="font-black">Accuracy dashboard</div>
-              <div className="text-[11px] text-slate-400">
-                {metrics?.updatedAt ? `Updated ${fmtDate(metrics.updatedAt)}` : '—'}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3">
-              <Stat label="Measured items" value={metrics ? metrics.totalMeasured : '—'} />
-              <Stat label="Direction accuracy" value={metrics ? `${metrics.directionAccuracy}%` : '—'} accent />
-              <Stat label="Avg error" value={metrics ? `${metrics.avgAbsError} pts` : '—'} />
-              <Stat label="High-score hit" value={metrics ? `${metrics.highScoreHitRate}%` : '—'} />
-            </div>
-
-            <div className="text-[11px] text-slate-400 mt-2">
-              Based on items with realized reactions (+1D / +5D). Metrics improve as more items get measured.
-            </div>
-          </div>
-
-          {/* existing stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
             <Stat label="Items" value={stats.total} />
             <Stat label="Avg score" value={stats.total ? stats.avgScore : '—'} accent />
@@ -360,8 +307,9 @@ export default function HomePage() {
                       <th className="text-left py-3 pr-3">Score</th>
                       <th className="text-left py-3 pr-3">Expected</th>
                       <th className="text-left py-3 pr-3">Realized</th>
-                      <th className="text-left py-3 pr-3">Conf</th> 
-                      <th className="text-left py-3 pr-3">Tech</th>
+                      <th className="text-left py-3 pr-3">Conf</th>
+                      {/* ✅ NEW: Technical (Conf’tan sonra daha iyi) */}
+                      <th className="text-left py-3 pr-3">Technical</th>
                       <th className="text-left py-3 pr-3">⚠️</th>
                       <th className="text-left py-3 pr-3">+1D</th>
                       <th className="text-left py-3 pr-3">+5D</th>
@@ -411,9 +359,15 @@ export default function HomePage() {
                             <ProgressBar value={it.confidence ?? 0} />
                           </div>
                         </td>
-                        <td className="py-4 pr-3 text-slate-200 min-w-[220px]">
-  {it.technicalContext ?? "—"}
-</td>
+
+                        {/* ✅ Technical */}
+                        <td className="py-4 pr-3 text-slate-200 min-w-[260px]">
+                          {it.technicalContext ? (
+                            <span className="text-[12px] text-slate-200">{it.technicalContext}</span>
+                          ) : (
+                            <span className="text-slate-600">—</span>
+                          )}
+                        </td>
 
                         <td className="py-4 pr-3">
                           {it.tooEarly ? (
@@ -454,6 +408,7 @@ export default function HomePage() {
 
 function TopCard({ it }: { it: LeaderItem }) {
   const p = pricedInText(it.pricedIn);
+
   return (
     <a
       href={it.url || '#'}
@@ -494,12 +449,23 @@ function TopCard({ it }: { it: LeaderItem }) {
         <span className={`inline-flex items-center px-2.5 py-1 rounded-full border ${p.cls}`}>
           {p.txt}
         </span>
+
         <span className="inline-flex items-center px-2.5 py-1 rounded-full border bg-white/5 border-white/10 text-slate-200">
           +1D {fmtPct(it.ret1d)}
         </span>
         <span className="inline-flex items-center px-2.5 py-1 rounded-full border bg-white/5 border-white/10 text-slate-200">
           +5D {fmtPct(it.ret5d)}
         </span>
+
+        {/* ✅ Technical badge (taşmasın) */}
+        {it.technicalContext ? (
+          <span
+            title={it.technicalContext}
+            className="inline-flex items-center px-2.5 py-1 rounded-full border bg-white/5 border-white/10 text-slate-200 max-w-[260px] truncate"
+          >
+            {it.technicalContext}
+          </span>
+        ) : null}
       </div>
 
       <div className="mt-4 text-[11px] text-slate-400">

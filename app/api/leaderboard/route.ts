@@ -27,13 +27,18 @@ type LeaderItem = {
 
   technicalContext?: string | null;
 
-  // ✅ NEW (scan tarafıyla uyum)
+  // ✅ scan tarafıyla uyum (teknik ekstra alanlar)
   expectedDir?: Dir;
   realizedDir?: Dir;
   rsi14?: number | null;
   breakout20?: boolean | null;
   bullTrap?: boolean | null;
   volumeSpike?: boolean | null;
+
+  // ✅ Gemini yorumları (UI’de “AL yorumları”)
+  aiSummary?: string | null;
+  aiBullets?: string[] | null;
+  aiSentiment?: "bullish" | "bearish" | "mixed" | "neutral" | null;
 };
 
 function clamp(n: number, a: number, b: number) {
@@ -67,25 +72,36 @@ export async function GET(req: Request) {
 
     let items = data.items;
 
-    // ✅ q filtresi: technicalContext + headline/type/symbol
+    // ✅ q filtresi: headline/type/symbol + technicalContext + aiSummary + aiBullets
     if (q) {
       items = items.filter((it) => {
-        const blob = `${it.symbol} ${it.headline} ${it.type || ""} ${it.technicalContext || ""}`.toLowerCase();
+        const blob = [
+          it.symbol,
+          it.headline,
+          it.type || "",
+          it.technicalContext || "",
+          it.aiSummary || "",
+          Array.isArray(it.aiBullets) ? it.aiBullets.join(" ") : "",
+          it.aiSentiment || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+
         return blob.includes(q);
       });
     }
 
-    // min filtresi
+    // ✅ min filtresi
     items = items.filter((x) => (x?.score ?? 0) >= min);
 
-    // sort
+    // ✅ sort
     items = [...items].sort((a, b) => {
       if (sort === "newest") return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
       if (sort === "confidence") return (b.confidence ?? 0) - (a.confidence ?? 0);
       return (b.score ?? 0) - (a.score ?? 0);
     });
 
-    // limit
+    // ✅ limit
     items = items.slice(0, limit);
 
     return NextResponse.json(
@@ -99,6 +115,8 @@ export async function GET(req: Request) {
         { status: 500 }
       );
     }
+
+    // prod: sessiz degrade
     return NextResponse.json(
       { asOf: new Date().toISOString(), items: [] },
       { status: 200 }

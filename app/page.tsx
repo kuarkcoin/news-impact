@@ -360,7 +360,8 @@ export default function HomePage() {
                       <th className="text-left py-3 pr-3">Score</th>
                       <th className="text-left py-3 pr-3">Expected</th>
                       <th className="text-left py-3 pr-3">Realized</th>
-                      <th className="text-left py-3 pr-3">Conf</th>
+                      <th className="text-left py-3 pr-3">Conf</th> 
+                      <th className="text-left py-3 pr-3">Tech</th>
                       <th className="text-left py-3 pr-3">⚠️</th>
                       <th className="text-left py-3 pr-3">+1D</th>
                       <th className="text-left py-3 pr-3">+5D</th>

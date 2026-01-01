@@ -64,22 +64,6 @@ type CandleData = { t: number[]; c: number[] };
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
 // =========================
-// AUTH (Cron Secret)
-// =========================
-function assertCronAuth(req: Request) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-
-  const { searchParams } = new URL(req.url);
-  if (searchParams.get("secret") === secret) return true;
-
-  const authHeader = req.headers.get("authorization");
-  if (authHeader === `Bearer ${secret}`) return true;
-
-  return false;
-}
-
-// =========================
 // BATCH cursor
 // =========================
 function pickBatch(universe: string[], cursor: number) {

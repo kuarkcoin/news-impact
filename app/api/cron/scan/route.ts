@@ -1,43 +1,40 @@
-// app/api/cron/scan/route.ts
 import { NextResponse } from "next/server";
+import { kv } from "@vercel/kv";
 
-/**
- * Cron auth guard
- * - Vercel Cron: ?secret=CRON_SECRET
- * - Future: Authorization: Bearer CRON_SECRET
- */
+// ... (Buraya yukarıdaki fetchSymbolItems, fetchCandles vb. tüm yardımcı fonksiyonları koyun) ...
+
 function assertCronAuth(req: Request) {
   const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-
-  // 1️⃣ Query secret (Vercel Cron ile %100 uyumlu)
   const { searchParams } = new URL(req.url);
-  if (searchParams.get("secret") === secret) return true;
-
-  // 2️⃣ Header-based (QStash / GitHub Actions uyumlu)
   const authHeader = req.headers.get("authorization");
-  if (authHeader === `Bearer ${secret}`) return true;
-
-  return false;
+  return searchParams.get("secret") === secret || authHeader === `Bearer ${secret}`;
 }
 
 export async function GET(req: Request) {
+  if (!assertCronAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   try {
-    // 🔐 AUTH
-    if (!assertCronAuth(req)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    // 1. Evreni ve Cursor'ı al
+    const universe = (await kv.get("symbols:universe")) as string[] || DEFAULT_UNIVERSE;
+    const cursor = (await kv.get("symbols:cursor") as number) || 0;
+
+    // 2. Batch'i tara
+    const { batch, nextCursor } = pickBatch(universe, cursor);
+    const newItems = [];
+    for (const sym of batch) {
+      const items = await fetchSymbolItems(sym);
+      newItems.push(...items);
     }
 
-    // ✅ ŞİMDİ BURADA TARAMA / CACHE ISITMA / DB YAZMA NE VARSA ÇALIŞIR
-    // Örnek response (test için):
-    return NextResponse.json({
-      ok: true,
-      ranAt: new Date().toISOString(),
-    });
+    // 3. Pool'u güncelle
+    const poolRaw = await kv.get("pool:v1") as any;
+    const merged = [...newItems, ...(poolRaw?.items || [])].slice(0, 600);
+    
+    await kv.set("pool:v1", { asOf: new Date().toISOString(), items: merged });
+    await kv.set("symbols:cursor", nextCursor);
+
+    return NextResponse.json({ ok: true, added: newItems.length });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }

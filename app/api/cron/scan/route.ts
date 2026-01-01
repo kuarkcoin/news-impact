@@ -7,33 +7,21 @@ export const maxDuration = 60;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const CRON_SECRET = process.env.CRON_SECRET;
 
-// =========================
-// CONFIG (Finnhub Free Safe)
-// =========================
-const BATCH_SIZE = 15;          // her cron: 15 hisse
-const PER_SYMBOL = 1;           // her hisse: 1 haber (stabil)
-const MAX_POOL_ITEMS = 800;     // KV’de havuz
-const MAX_NEWS_AGE_DAYS = 10;   // 10 günden eski haberleri alma
+const BATCH_SIZE = 15;
+const PER_SYMBOL = 1;
+const MAX_POOL_ITEMS = 800;
+const MAX_NEWS_AGE_DAYS = 10;
 
-// 200'lü universe (karışık US mega/large caps + tech ağırlık)
 const DEFAULT_UNIVERSE: string[] = [
   "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AMD","AVGO","INTC","QCOM","TXN","MU","NFLX","ADBE",
   "CRM","PLTR","COIN","MSTR","UBER","SHOP","PYPL","ASML","AMAT","LRCX","KLAC","SNPS","CDNS","NOW","INTU","CSCO",
-  "ORCL","IBM","DELL","HPQ","PANW","CRWD","ZS","OKTA","NET","DDOG","MDB","SMCI","ARM","TSM","TXN","ADI","NXPI",
-  "MRVL","ON","GFS","ANET","DE","CAT","BA","GE","HON","MMM","LMT","NOC","GD","RTX","CVX","XOM","COP","SLB",
-  "NEE","DUK","SO","AEP","D","EXC","SRE","PG","KO","PEP","COST","WMT","TGT","HD","LOW","MCD","SBUX","NKE",
-  "DIS","CMCSA","T","VZ","TMUS","ABNB","BKNG","MAR","RCL","CCL","DAL","UAL","LUV","AAL","JPM","BAC","WFC","C",
-  "GS","MS","BLK","SCHW","AXP","V","MA","SQ","ADP","PAYX","TEAM","SNOW","DOCU","ZM","TWLO","ROKU","SPOT","PINS",
-  "EBAY","ETSY","F","GM","RIVN","LCID","NIO","LI","XPEV","PDD","BABA","JD","BIDU","NTES","TSM","SAP","SONY",
-  "INTU","WDAY","ORLY","AZO","TSCO","CVS","UNH","HUM","CI","PFE","MRK","BMY","LLY","AMGN","GILD","REGN","VRTX",
-  "BIIB","ISRG","SYK","BSX","MDT","TMO","DHR","ABT","ABBV","ZBH","ILMN","IDXX","EL","CL","KMB","GIS","KHC",
-  "KR","SYY","DG","DLTR","CHTR","EA","TTWO","ATVI","RBLX","U","FSLY","AKAM","MTCH","IAC","SNAP","RDFN",
-  "ACN","INTC","AIG","SPGI","ICE","CME","MCO","MSCI","BK","USB","PNC","TFC","COF","DFS","ALL","TRV","PGR",
-  "MET","PRU","AON","MMC","APH","ETN","EMR","ROK","CSX","NSC","UNP","FDX","UPS","WM","RSG","WBA","KDP",
-  "NEM","GOLD","FCX","NUE","X","AA","MOS","CF","DOW","LYB","OXY","DVN","EOG","MPC","VLO"
+  "ORCL","IBM","DELL","HPQ","PANW","CRWD","ZS","OKTA","NET","DDOG","MDB","SMCI","ARM","TSM","ADI","NXPI",
+  "MRVL","ON","GFS","ANET","JPM","BAC","WFC","GS","MS","BLK","V","MA","COST","WMT","HD","LOW","MCD","SBUX",
+  "NKE","DIS","CMCSA","T","VZ","TMUS","ABNB","BKNG","UNH","LLY","AMGN","TMO","DHR","MRK","ABBV","AVGO","TSM",
+  "PFE","CVX","XOM","COP","NEE","PG","KO","PEP","ADP","TEAM","SNOW","DOCU","ZM","TWLO","ROKU","SPOT","EA","TTWO",
+  "FDX","UPS","WM","RSG","CAT","BA","GE","HON","LMT","RTX","NOC","CSX","UNP","NSC","OXY","EOG","MPC","VLO"
 ].slice(0, 200);
 
-// --- Keyword scoring (demo/expected) ---
 const BULLISH_KEYWORDS = [
   "beat","record","jump","soar","surge","approve","launch","partnership","buyback","dividend","upgrade","growth",
   "raises","raise","strong","profit","wins","contract","guidance","earnings","revenue","margin","outperform"
@@ -60,31 +48,27 @@ type LeaderItem = {
   score: number;
   confidence: number;
   tooEarly: boolean;
+
+  measuredAt?: string | null;
 };
+
+type PoolPayload = { asOf: string; items: LeaderItem[] };
 
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
-// =========================
-// AUTH
-// =========================
 function assertCronAuth(req: Request) {
   if (!CRON_SECRET) return false;
 
-  // 1) Query
   const { searchParams } = new URL(req.url);
   const qs = searchParams.get("secret");
   if (qs && qs === CRON_SECRET) return true;
 
-  // 2) Header
   const authHeader = req.headers.get("authorization");
   if (authHeader === `Bearer ${CRON_SECRET}`) return true;
 
   return false;
 }
 
-// =========================
-// HELPERS
-// =========================
 function pickBatch(universe: string[], cursor: number) {
   const batch: string[] = [];
   for (let i = 0; i < BATCH_SIZE; i++) batch.push(universe[(cursor + i) % universe.length]);
@@ -127,16 +111,8 @@ function scoreFromHeadline(headline: string) {
   for (const w of BULLISH_KEYWORDS) if (text.includes(w)) s += 15;
   for (const w of BEARISH_KEYWORDS) if (text.includes(w)) s -= 15;
 
-  // Expected: 50..95
   const expectedImpact = clamp(65 + s, 50, 95);
-
-  // Demo mod: realized = expected
-  const realizedImpact = expectedImpact;
-
-  // Combined score (demo)
-  const score = expectedImpact;
-
-  return { expectedImpact, realizedImpact, score };
+  return { expectedImpact, realizedImpact: expectedImpact, score: expectedImpact };
 }
 
 async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
@@ -185,7 +161,8 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
       realizedImpact,
       score,
       confidence: 30,
-      tooEarly: true
+      tooEarly: true,
+      measuredAt: null
     });
 
     if (items.length >= PER_SYMBOL) break;
@@ -194,23 +171,21 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   return items;
 }
 
-// =========================
-// ROUTE
-// =========================
+function rebuildLeaderboard(items: LeaderItem[]) {
+  const bestBySymbol = new Map<string, LeaderItem>();
+  for (const it of items) {
+    const prev = bestBySymbol.get(it.symbol);
+    if (!prev || (it.score ?? 0) > (prev.score ?? 0)) bestBySymbol.set(it.symbol, it);
+  }
+
+  return Array.from(bestBySymbol.values())
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, 120);
+}
+
 export async function GET(req: Request) {
   if (!assertCronAuth(req)) {
-    return NextResponse.json(
-      {
-        error: "Unauthorized",
-        debug: {
-          hasEnvSecret: !!CRON_SECRET,
-          envSecretLen: (CRON_SECRET || "").length,
-          hasFinnhubKey: !!FINNHUB_API_KEY,
-          hasKvEnv: !!process.env.KV_REST_API_URL && !!process.env.KV_REST_API_TOKEN
-        }
-      },
-      { status: 401 }
-    );
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {
@@ -226,32 +201,38 @@ export async function GET(req: Request) {
 
     const { batch, nextCursor } = pickBatch(universe, cursor);
 
+    // yeni haberler
     const newItems: LeaderItem[] = [];
     for (const sym of batch) {
       const arr = await fetchSymbolItems(sym);
       newItems.push(...arr);
     }
 
-    // Pool merge
-    const poolRaw = (await kv.get("pool:v1")) as { asOf?: string; items?: LeaderItem[] } | null;
+    // mevcut pool
+    const poolRaw = (await kv.get("pool:v1")) as PoolPayload | null;
     const oldItems = Array.isArray(poolRaw?.items) ? poolRaw!.items : [];
-    const merged = [...newItems, ...oldItems].slice(0, MAX_POOL_ITEMS);
 
-    const poolPayload = { asOf: new Date().toISOString(), items: merged };
-    await kv.set("pool:v1", poolPayload);
+    // dedupe: aynı symbol+headline+publishedAt
+    const seen = new Set<string>();
+    const merged: LeaderItem[] = [];
 
-    // ✅ Leaderboard: tek sembol = en iyi skor
-    const bestBySymbol = new Map<string, LeaderItem>();
-    for (const it of merged) {
-      const prev = bestBySymbol.get(it.symbol);
-      if (!prev || (it.score ?? 0) > (prev.score ?? 0)) bestBySymbol.set(it.symbol, it);
+    const keyOf = (it: LeaderItem) =>
+      `${it.symbol}|${it.publishedAt}|${(it.headline || "").trim().toLowerCase()}`;
+
+    for (const it of [...newItems, ...oldItems]) {
+      const k = keyOf(it);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      merged.push(it);
+      if (merged.length >= MAX_POOL_ITEMS) break;
     }
 
-    const leaderboard = Array.from(bestBySymbol.values())
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .slice(0, 120);
+    const poolPayload: PoolPayload = { asOf: new Date().toISOString(), items: merged };
+    await kv.set("pool:v1", poolPayload);
 
+    const leaderboard = rebuildLeaderboard(merged);
     await kv.set("leaderboard:v1", { asOf: new Date().toISOString(), items: leaderboard });
+
     await kv.set("symbols:cursor", nextCursor);
 
     return NextResponse.json(
@@ -260,14 +241,8 @@ export async function GET(req: Request) {
     );
   } catch (e: any) {
     if (String(e?.message || "").includes("429")) {
-      return NextResponse.json(
-        { error: "Finnhub rate limit (429). Try later." },
-        { status: 429 }
-      );
+      return NextResponse.json({ error: "Finnhub rate limit (429). Try later." }, { status: 429 });
     }
-    return NextResponse.json(
-      { error: e?.message || "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || "Unknown error" }, { status: 500 });
   }
 }

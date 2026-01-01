@@ -411,6 +411,9 @@ export default function HomePage() {
                             <ProgressBar value={it.confidence ?? 0} />
                           </div>
                         </td>
+                        <td className="py-4 pr-3 text-slate-200 min-w-[220px]">
+  {it.technicalContext ?? "—"}
+</td>
 
                         <td className="py-4 pr-3">
                           {it.tooEarly ? (

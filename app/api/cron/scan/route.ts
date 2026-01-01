@@ -1,7 +1,18 @@
 // app/api/cron/scan/route.ts
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
+// ✅ CRON AUTH (VERCEL)
+function assertCronAuth(req: Request) {
+  // Vercel cron tetiklemelerinde otomatik gelir
+  if (req.headers.get("x-vercel-cron") === "1") return true;
 
+  // manuel test için opsiyonel (lokalde curl ile çağırmak için)
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+
+  const { searchParams } = new URL(req.url);
+  return searchParams.get("secret") === secret;
+}
 export const runtime = "nodejs";
 export const maxDuration = 60;
 

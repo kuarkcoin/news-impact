@@ -8,7 +8,8 @@ type LeaderboardItem = {
   headline: string;
   type?: string | null;
   publishedAt: string; // ISO
-  score: number; // 50..100
+  score: number; // 0..100 or 50..100
+
   pricedIn?: boolean | null;
   retPre5?: number | null;
   ret1d?: number | null;
@@ -21,15 +22,22 @@ type LeaderboardItem = {
   confidence?: number;
   tooEarly?: boolean;
   technicalContext?: string | null;
+
   rsi14?: number | null;
   breakout20?: boolean | null;
   volumeSpike?: boolean | null;
   bullTrap?: boolean | null;
+
   expectedDir?: -1 | 0 | 1;
   realizedDir?: -1 | 0 | 1;
+
   aiSummary?: string | null;
   aiBullets?: string[] | null;
   aiSentiment?: 'bullish' | 'bearish' | 'mixed' | 'neutral' | null;
+
+  // ✅ leaderboard route ekledi (UI için)
+  signals?: string[] | null;
+  signalsText?: string | null;
 };
 
 type LeaderboardResponse = {
@@ -66,15 +74,38 @@ function pctColor(x: number | null | undefined) {
 }
 
 function scoreTone(score: number) {
-  if (score >= 85) return { pill: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25', ring: 'ring-emerald-400/30' };
-  if (score >= 70) return { pill: 'bg-cyan-400/15 text-cyan-200 border-cyan-400/25', ring: 'ring-cyan-400/30' };
-  if (score >= 60) return { pill: 'bg-amber-400/15 text-amber-200 border-amber-400/25', ring: 'ring-amber-400/30' };
-  return { pill: 'bg-slate-400/10 text-slate-200 border-white/10', ring: 'ring-white/10' };
+  if (score >= 85)
+    return {
+      pill: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25',
+      ring: 'ring-emerald-400/30',
+    };
+  if (score >= 70)
+    return {
+      pill: 'bg-cyan-400/15 text-cyan-200 border-cyan-400/25',
+      ring: 'ring-cyan-400/30',
+    };
+  if (score >= 60)
+    return {
+      pill: 'bg-amber-400/15 text-amber-200 border-amber-400/25',
+      ring: 'ring-amber-400/30',
+    };
+  return {
+    pill: 'bg-slate-400/10 text-slate-200 border-white/10',
+    ring: 'ring-white/10',
+  };
 }
 
 function pricedInUI(v: boolean | null | undefined) {
-  if (v === false) return { txt: '🔥 Not priced-in', cls: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25' };
-  if (v === true) return { txt: '⚠️ Mostly priced-in', cls: 'bg-amber-400/15 text-amber-200 border-amber-400/25' };
+  if (v === false)
+    return {
+      txt: '🔥 Not priced-in',
+      cls: 'bg-emerald-400/15 text-emerald-200 border-emerald-400/25',
+    };
+  if (v === true)
+    return {
+      txt: '⚠️ Mostly priced-in',
+      cls: 'bg-amber-400/15 text-amber-200 border-amber-400/25',
+    };
   return { txt: '— Unclear', cls: 'bg-white/5 text-slate-200 border-white/10' };
 }
 
@@ -86,15 +117,23 @@ function impactLabel(score: number) {
 }
 
 function impactBarWidth(score: number) {
-  // 50..100 -> 0..100 gibi göstermek daha dramatik
+  // 50..100 -> 0..100 gibi
   const w = (score - 50) * 2;
   return clampInt(w, 0, 100);
 }
 
-function MiniBar({ label, value }: { label: string; value: number | null | undefined }) {
+function MiniBar({
+  label,
+  value,
+  dimIfNull = false,
+}: {
+  label: string;
+  value: number | null | undefined;
+  dimIfNull?: boolean;
+}) {
   if (typeof value !== 'number') {
     return (
-      <div className="space-y-1">
+      <div className={`space-y-1 ${dimIfNull ? 'opacity-60' : ''}`}>
         <div className="flex items-center justify-between text-[11px] text-slate-400">
           <span className="font-bold">{label}</span>
           <span className="font-black">—</span>
@@ -114,7 +153,10 @@ function MiniBar({ label, value }: { label: string; value: number | null | undef
         <span className="font-black">{clamped}%</span>
       </div>
       <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-        <div className="h-full bg-emerald-400/80 transition-all" style={{ width: `${clamped}%` }} />
+        <div
+          className="h-full bg-emerald-400/80 transition-all"
+          style={{ width: `${clamped}%` }}
+        />
       </div>
     </div>
   );
@@ -204,12 +246,7 @@ export default function HomePage() {
     const top = items[0]?.score ?? null;
     const avg = n ? items.reduce((a, b) => a + (b.score || 0), 0) / n : null;
     const priced = n ? items.filter((x) => x.pricedIn === true).length : 0;
-    return {
-      n,
-      top,
-      avg,
-      priced,
-    };
+    return { n, top, avg, priced };
   }, [items]);
 
   const filtered = useMemo(() => {
@@ -221,14 +258,14 @@ export default function HomePage() {
         const a = (it.symbol || '').toLowerCase();
         const b = (it.headline || '').toLowerCase();
         const c = (it.type || '').toLowerCase();
-        return a.includes(qq) || b.includes(qq) || c.includes(qq);
+        const d = (it.signalsText || '').toLowerCase();
+        const e = (it.technicalContext || '').toLowerCase();
+        return a.includes(qq) || b.includes(qq) || c.includes(qq) || d.includes(qq) || e.includes(qq);
       });
     }
 
     arr = [...arr].sort((a, b) => {
-      if (sort === 'newest') {
-        return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
-      }
+      if (sort === 'newest') return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
       if (sort === 'ret5d') {
         const aa = typeof a.ret5d === 'number' ? a.ret5d : -999;
         const bb = typeof b.ret5d === 'number' ? b.ret5d : -999;
@@ -240,7 +277,6 @@ export default function HomePage() {
     return arr;
   }, [items, q, sort]);
 
-  // pagination-like (client-side simple)
   const paged = useMemo(() => filtered.slice(0, perPage), [filtered, perPage]);
 
   return (
@@ -262,7 +298,9 @@ export default function HomePage() {
               </div>
               <div>
                 <div className="font-black leading-tight">NewsImpact</div>
-                <div className="text-[11px] text-slate-400 leading-tight">Nasdaq news reaction ranking</div>
+                <div className="text-[11px] text-slate-400 leading-tight">
+                  Nasdaq news reaction ranking
+                </div>
               </div>
             </div>
 
@@ -301,9 +339,15 @@ export default function HomePage() {
               </p>
 
               <div className="mt-5 flex flex-wrap gap-2 text-xs">
-                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">⚡ Updated frequently</span>
-                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">🧠 Priced-in detection</span>
-                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">📊 +1D / +5D returns</span>
+                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
+                  ⚡ Updated frequently
+                </span>
+                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
+                  🧠 Priced-in detection
+                </span>
+                <span className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
+                  📊 +1D / +5D returns
+                </span>
               </div>
             </div>
 
@@ -312,19 +356,24 @@ export default function HomePage() {
               <div className="rounded-3xl bg-white/5 border border-white/10 shadow-xl p-5">
                 <div className="flex items-center justify-between">
                   <div className="font-black">Today Snapshot</div>
-                  <div className="text-[11px] text-slate-400">{data?.asOf ? fmtDate(data.asOf) : '—'}</div>
+                  <div className="text-[11px] text-slate-400">
+                    {data?.asOf ? fmtDate(data.asOf) : '—'}
+                  </div>
                 </div>
 
-                <div className="mt-4 grid grid-cols-3 gap-3">
+                {/* ✅ mobilde daha az yer kaplasın */}
+                <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
                   <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
                     <div className="text-[11px] text-slate-400">Events</div>
                     <div className="mt-1 text-xl font-black">{stats.n || '—'}</div>
                   </div>
                   <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
                     <div className="text-[11px] text-slate-400">Top score</div>
-                    <div className="mt-1 text-xl font-black">{typeof stats.top === 'number' ? stats.top : '—'}</div>
+                    <div className="mt-1 text-xl font-black">
+                      {typeof stats.top === 'number' ? stats.top : '—'}
+                    </div>
                   </div>
-                  <div className="rounded-2xl bg-slate-900/40 border border-white/10 p-3">
+                  <div className="hidden sm:block rounded-2xl bg-slate-900/40 border border-white/10 p-3">
                     <div className="text-[11px] text-slate-400">Priced-in</div>
                     <div className="mt-1 text-xl font-black">{stats.n ? `${stats.priced}` : '—'}</div>
                   </div>
@@ -358,7 +407,9 @@ export default function HomePage() {
                     placeholder="Search ticker or keyword…"
                     className="w-full sm:w-72 px-4 py-2.5 rounded-2xl bg-slate-900/70 border border-white/10 text-sm outline-none focus:border-emerald-400/40"
                   />
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">⌘K</div>
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">
+                    ⌘K
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -416,13 +467,17 @@ export default function HomePage() {
                   <div className="flex rounded-2xl overflow-hidden border border-white/10 bg-slate-900/70">
                     <button
                       onClick={() => setView('grid')}
-                      className={`px-3 py-2.5 text-sm font-black ${view === 'grid' ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                      className={`px-3 py-2.5 text-sm font-black ${
+                        view === 'grid' ? 'bg-white/10' : 'hover:bg-white/5'
+                      }`}
                     >
                       Grid
                     </button>
                     <button
                       onClick={() => setView('list')}
-                      className={`px-3 py-2.5 text-sm font-black ${view === 'list' ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                      className={`px-3 py-2.5 text-sm font-black ${
+                        view === 'list' ? 'bg-white/10' : 'hover:bg-white/5'
+                      }`}
                     >
                       List
                     </button>
@@ -463,6 +518,8 @@ export default function HomePage() {
                         const pi = pricedInUI(it.pricedIn ?? null);
                         const isTop = idx === 0 && sort === 'score' && !q;
 
+                        const signalLine = it.signalsText || it.technicalContext || null;
+
                         return (
                           <div
                             key={`${it.symbol}-${it.publishedAt}-${idx}`}
@@ -481,7 +538,9 @@ export default function HomePage() {
                                 </Link>
                               </div>
 
-                              <div className={`inline-flex items-center px-3 py-1.5 rounded-2xl border text-sm font-black ${tone.pill}`}>
+                              <div
+                                className={`inline-flex items-center px-3 py-1.5 rounded-2xl border text-sm font-black ${tone.pill}`}
+                              >
                                 {it.score}
                               </div>
                             </div>
@@ -512,42 +571,63 @@ export default function HomePage() {
                                 dimIfNull
                               />
 
-                              <ProgressBar value={typeof it.confidence === 'number' ? it.confidence : 0} />
+                              {/* ✅ ProgressBar yerine */}
+                              <ConfidenceBar value={typeof it.confidence === 'number' ? it.confidence : null} />
                             </div>
 
                             {/* badges */}
                             <div className="mt-4 flex flex-wrap gap-2">
-                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${pi.cls}`}>
+                              <span
+                                className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border ${pi.cls}`}
+                              >
                                 {pi.txt}
                               </span>
+
                               {it.tooEarly ? (
                                 <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border bg-amber-500/10 text-amber-200 border-amber-500/20">
                                   ⚠️ Too early to price
                                 </span>
                               ) : null}
-                              {it.technicalContext ? (
+
+                              {signalLine ? (
                                 <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-black border bg-white/5 text-slate-200 border-white/10">
                                   📊 Signals
                                 </span>
                               ) : null}
                             </div>
 
-                            {it.technicalContext ? (
+                            {signalLine ? (
                               <div className="mt-3 text-[12px] leading-snug text-slate-300/90">
-                                {it.technicalContext}
+                                {signalLine}
                               </div>
-                            ) : null}
+                            ) : (
+                              <div className="mt-3 text-[12px] text-slate-500">
+                                No technical signals (yet)
+                              </div>
+                            )}
 
                             {/* returns */}
                             <div className="mt-4 flex flex-wrap gap-2">
-                              <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.ret1d)}`}>
+                              <span
+                                className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(
+                                  it.ret1d
+                                )}`}
+                              >
                                 +1D {fmtPct(it.ret1d)}
                               </span>
-                              <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.ret5d)}`}>
+                              <span
+                                className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(
+                                  it.ret5d
+                                )}`}
+                              >
                                 +5D {fmtPct(it.ret5d)}
                               </span>
                               {typeof it.retPre5 === 'number' ? (
-                                <span className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(it.retPre5)}`}>
+                                <span
+                                  className={`px-2.5 py-1 rounded-full text-xs bg-slate-900/60 border border-white/10 ${pctColor(
+                                    it.retPre5
+                                  )}`}
+                                >
                                   Pre-5 {fmtPct(it.retPre5)}
                                 </span>
                               ) : null}
@@ -594,6 +674,7 @@ export default function HomePage() {
 
                       {paged.map((it, idx) => {
                         const tone = scoreTone(it.score);
+                        const signalLine = it.signalsText || it.technicalContext || '';
                         return (
                           <div
                             key={`${it.symbol}-${it.publishedAt}-${idx}`}
@@ -635,6 +716,11 @@ export default function HomePage() {
                                     Source ↗
                                   </a>
                                 ) : null}
+                                {signalLine ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-slate-200">
+                                    📊 {signalLine}
+                                  </span>
+                                ) : null}
                               </div>
                             </div>
 
@@ -645,7 +731,9 @@ export default function HomePage() {
                             </div>
 
                             <div className="col-span-1 text-right">
-                              <span className="text-[11px] font-black text-slate-200">{typeof it.confidence === 'number' ? `${it.confidence}%` : '—'}</span>
+                              <span className="text-[11px] font-black text-slate-200">
+                                {typeof it.confidence === 'number' ? `${it.confidence}%` : '—'}
+                              </span>
                             </div>
 
                             <div className="col-span-1 text-right text-slate-200 font-black">
@@ -656,8 +744,12 @@ export default function HomePage() {
                               {typeof it.realizedImpact === 'number' ? it.realizedImpact : '—'}
                             </div>
 
-                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret1d)}`}>{fmtPct(it.ret1d)}</div>
-                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret5d)}`}>{fmtPct(it.ret5d)}</div>
+                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret1d)}`}>
+                              {fmtPct(it.ret1d)}
+                            </div>
+                            <div className={`col-span-1 text-right font-bold ${pctColor(it.ret5d)}`}>
+                              {fmtPct(it.ret5d)}
+                            </div>
                           </div>
                         );
                       })}

@@ -7,21 +7,6 @@ export const maxDuration = 60;
 
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const SYMBOL_ALIASES: Record<string, string[]> = {
-  AAPL: ["apple", "iphone", "ipad", "mac", "ios"],
-  MSFT: ["microsoft", "windows", "azure", "copilot"],
-  NVDA: ["nvidia", "gpu", "cuda", "h100"],
-  TSLA: ["tesla", "elon", "fsd", "model"],
-  AMD: ["amd", "ryzen", "epyc"],
-  META: ["meta", "facebook", "instagram"],
-  GOOGL: ["google", "alphabet", "youtube"],
-};
-function isRelevant(symbol: string, headline: string) {
-  const t = headline.toLowerCase();
-  const aliases = SYMBOL_ALIASES[symbol] || [symbol.toLowerCase()];
-  return aliases.some(a => t.includes(a));
-}
-
 
 // =========================
 // CRON AUTH (VERCEL + OPTIONAL MANUAL)
@@ -29,7 +14,6 @@ function isRelevant(symbol: string, headline: string) {
 function isVercelCron(req: Request) {
   return req.headers.get("x-vercel-cron") === "1";
 }
-
 function hasValidSecret(req: Request) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
@@ -42,7 +26,6 @@ function hasValidSecret(req: Request) {
 
   return false;
 }
-
 function assertCronAuth(req: Request) {
   if (isVercelCron(req)) return true;
   return hasValidSecret(req);
@@ -51,20 +34,21 @@ function assertCronAuth(req: Request) {
 // =========================
 // SETTINGS (Finnhub Free-safe)
 // =========================
-const BATCH_SIZE = 6;
-const PER_SYMBOL = 2;
+const BATCH_SIZE = 6;                  // her çalışmada kaç sembol taransın
+const PER_SYMBOL = 3;                  // sembol başı kaç haber alınsın (2 çok az kalıyor)
 const MAX_POOL_ITEMS = 600;
 const MAX_NEWS_AGE_DAYS = 10;
 const CANDLE_LOOKBACK_DAYS = 260;
 const CANDLE_CACHE_TTL_SEC = 6 * 60 * 60; // 6 saat
+const BETWEEN_SYMBOL_SLEEP_MS = 180;   // rate-limit koruması
 
-// ✅ Gemini safety limits
-const GEMINI_MAX_PER_RUN = 5;                 // her cron koşusunda max 5 yorum
-const GEMINI_ONLY_IF_SCORE_GTE = 75;          // düşük skorlara çağırma
-const GEMINI_CACHE_TTL_SEC = 7 * 24 * 3600;   // 7 gün cache
+// Gemini limits
+const GEMINI_MAX_PER_RUN = 5;
+const GEMINI_ONLY_IF_SCORE_GTE = 78;
+const GEMINI_CACHE_TTL_SEC = 7 * 24 * 3600;
 
 // =========================
-// UNIVERSE
+// NASDAQ UNIVERSE (sadece Nasdaq)
 // =========================
 const DEFAULT_UNIVERSE: string[] = [
   "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD","AVGO","INTC","QCOM","TXN","MU","NFLX","ADBE","CRM",
@@ -72,16 +56,63 @@ const DEFAULT_UNIVERSE: string[] = [
 ];
 
 // =========================
+// RELEVANCE (alakasız haberleri ele)
+// =========================
+const SYMBOL_ALIASES: Record<string, string[]> = {
+  AAPL: ["apple", "iphone", "ipad", "mac", "ios", "app store", "tim cook"],
+  MSFT: ["microsoft", "windows", "azure", "copilot", "satya"],
+  NVDA: ["nvidia", "gpu", "cuda", "h100", "blackwell", "jensen"],
+  AMZN: ["amazon", "aws", "prime"],
+  META: ["meta", "facebook", "instagram", "whatsapp", "zuckerberg"],
+  GOOGL: ["google", "alphabet", "youtube", "gemini"],
+  TSLA: ["tesla", "elon", "fsd", "model 3", "model y", "cybertruck"],
+  AMD: ["amd", "ryzen", "epyc", "lisa su"],
+  AVGO: ["broadcom", "avgo", "vmware"],
+  INTC: ["intel"],
+  QCOM: ["qualcomm", "snapdragon"],
+  TXN: ["texas instruments"],
+  MU: ["micron"],
+  NFLX: ["netflix"],
+  ADBE: ["adobe"],
+  CRM: ["salesforce"],
+  PLTR: ["palantir"],
+  COIN: ["coinbase"],
+  MSTR: ["microstrategy"],
+  UBER: ["uber"],
+  SHOP: ["shopify"],
+  PYPL: ["paypal"],
+  ASML: ["asml"],
+  AMAT: ["applied materials"],
+  LRCX: ["lam research"],
+  KLAC: ["kla"],
+  SNPS: ["synopsys"],
+  CDNS: ["cadence"],
+  NOW: ["servicenow"],
+  INTU: ["intuit", "turbotax", "quickbooks"],
+  CSCO: ["cisco"],
+  ORCL: ["oracle"],
+};
+
+function isRelevant(symbol: string, headline: string) {
+  const t = (headline || "").toLowerCase();
+  const aliases = SYMBOL_ALIASES[symbol] || [symbol.toLowerCase()];
+  // En az bir alias geçmeli
+  return aliases.some((a) => a && t.includes(a));
+}
+
+// =========================
 // SIMPLE NLP
 // =========================
 const BULLISH_KEYWORDS = [
   "beat","record","jump","soar","surge","approve","launch","partnership","buyback","dividend","upgrade","growth",
-  "raises","raise","strong","profit","wins","contract","guidance","earnings","eps"
+  "raises","raise","strong","profit","wins","contract","guidance","earnings","eps","acquire","acquisition"
 ];
 const BEARISH_KEYWORDS = [
   "miss","fail","drop","fall","plunge","sue","lawsuit","investigation","downgrade","cut","weak","loss","ban",
-  "recall","resign","delay","lower","warning","sec","probe"
+  "recall","resign","delay","lower","warning","sec","probe","antitrust"
 ];
+
+type Dir = -1 | 0 | 1;
 
 type LeaderItem = {
   symbol: string;
@@ -102,8 +133,8 @@ type LeaderItem = {
   confidence: number;
   tooEarly: boolean;
 
-  expectedDir: -1 | 0 | 1;
-  realizedDir: -1 | 0 | 1;
+  expectedDir: Dir;
+  realizedDir: Dir;
   rsi14: number | null;
   breakout20: boolean | null;
   bullTrap: boolean | null;
@@ -111,9 +142,13 @@ type LeaderItem = {
 
   technicalContext: string | null;
 
-  // ✅ Gemini yorumları
-  aiSummary?: string | null;     // tek cümle
-  aiBullets?: string[] | null;   // 3-5 madde
+  // UI sinyalleri
+  signals: string[];
+  signalsText: string;
+
+  // Gemini yorumları
+  aiSummary?: string | null;
+  aiBullets?: string[] | null;
   aiSentiment?: "bullish" | "bearish" | "mixed" | "neutral" | null;
 };
 
@@ -134,7 +169,7 @@ function pickBatch(universe: string[], cursor: number) {
   return { batch, nextCursor };
 }
 
-/** last index where times[idx] <= target */
+// ✅ more robust than findIndex: last candle <= target
 function findLastLE(times: number[], target: number) {
   let lo = 0, hi = times.length - 1, ans = -1;
   while (lo <= hi) {
@@ -143,6 +178,10 @@ function findLastLE(times: number[], target: number) {
     else hi = mid - 1;
   }
   return ans;
+}
+
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // =========================
@@ -156,15 +195,15 @@ async function fetchWithRetry(url: string, maxRetries = 3) {
       const res = await fetch(url, { cache: "no-store" });
 
       if (res.status === 429) {
-        const wait = attempt === 0 ? 800 : attempt === 1 ? 1600 : 2600;
-        await new Promise((r) => setTimeout(r, wait));
+        const wait = attempt === 0 ? 900 : attempt === 1 ? 1800 : 2800;
+        await sleep(wait);
         lastErr = new Error("429");
         continue;
       }
 
       if (res.status >= 500) {
-        const wait = attempt === 0 ? 500 : attempt === 1 ? 1200 : 2200;
-        await new Promise((r) => setTimeout(r, wait));
+        const wait = attempt === 0 ? 600 : attempt === 1 ? 1200 : 2200;
+        await sleep(wait);
         lastErr = new Error(`HTTP_${res.status}`);
         continue;
       }
@@ -172,8 +211,8 @@ async function fetchWithRetry(url: string, maxRetries = 3) {
       return res;
     } catch (e) {
       lastErr = e;
-      const wait = attempt === 0 ? 500 : attempt === 1 ? 1200 : 2200;
-      await new Promise((r) => setTimeout(r, wait));
+      const wait = attempt === 0 ? 600 : attempt === 1 ? 1200 : 2200;
+      await sleep(wait);
     }
   }
 
@@ -184,29 +223,28 @@ async function fetchWithRetry(url: string, maxRetries = 3) {
 // SCORING / DIRECTION
 // =========================
 function sentimentFromHeadline(headline: string) {
-  const text = headline.toLowerCase();
+  const text = (headline || "").toLowerCase();
   let s = 0;
 
-  for (const w of BULLISH_KEYWORDS) if (text.includes(w)) s += 15;
-  for (const w of BEARISH_KEYWORDS) if (text.includes(w)) s -= 15;
+  for (const w of BULLISH_KEYWORDS) if (text.includes(w)) s += 12;
+  for (const w of BEARISH_KEYWORDS) if (text.includes(w)) s -= 12;
 
   if (text.includes("but") || text.includes("despite") || text.includes("however")) {
-    s = Math.round(s * 0.65);
+    s = Math.round(s * 0.7);
   }
-
   if (text.includes("earnings") || text.includes("guidance") || text.includes("eps")) s += 10;
 
   return clamp(s, -30, 30);
 }
 
-function expectedDirectionFromHeadline(headline: string): -1 | 0 | 1 {
+function expectedDirectionFromHeadline(headline: string): Dir {
   const s = sentimentFromHeadline(headline);
   if (s >= 10) return 1;
   if (s <= -10) return -1;
   return 0;
 }
 
-function realizedDirection(ret1d: number | null, ret5d: number | null): -1 | 0 | 1 {
+function realizedDirection(ret1d: number | null, ret5d: number | null): Dir {
   const r = (ret5d ?? ret1d);
   if (typeof r !== "number") return 0;
   if (r > 0.01) return 1;
@@ -217,16 +255,17 @@ function realizedDirection(ret1d: number | null, ret5d: number | null): -1 | 0 |
 function calcExpectedImpact(headline: string, retPre5: number | null) {
   const s = sentimentFromHeadline(headline);
 
-  let exp = 65 + Math.round(s * 0.9);
+  let exp = 64 + Math.round(s * 0.9);
   let pricedIn = false;
 
+  // priced-in heuristics
   if (typeof retPre5 === "number") {
-    if (s > 0 && retPre5 > 0.05) { exp -= 22; pricedIn = true; }
-    if (s < 0 && retPre5 < -0.05) { exp += 10; pricedIn = true; }
-    if (s > 0 && retPre5 <= 0.02) exp += 10;
+    if (s > 0 && retPre5 > 0.06) { exp -= 22; pricedIn = true; }
+    if (s < 0 && retPre5 < -0.06) { exp += 8; pricedIn = true; }
+    if (s > 0 && retPre5 <= 0.02) exp += 8;
   }
 
-  return { expectedImpact: clamp(exp, 50, 95), pricedIn };
+  return { expectedImpact: clamp(exp, 45, 95), pricedIn };
 }
 
 function calcRealizedImpact(ret1d: number | null, ret5d: number | null) {
@@ -243,7 +282,7 @@ function combineScore(expectedImpact: number, realizedImpact: number | null, pri
     : Math.round(realizedImpact * 0.7 + expectedImpact * 0.3);
 
   if (pricedIn) score -= 8;
-  return clamp(score, 50, 100);
+  return clamp(score, 40, 100);
 }
 
 function calcConfidence(ret1d: number | null, ret5d: number | null, pricedIn: boolean) {
@@ -255,7 +294,7 @@ function calcConfidence(ret1d: number | null, ret5d: number | null, pricedIn: bo
 }
 
 // =========================
-// TECH HELPERS
+// TECH HELPERS (RSI, breakout, vol)
 // =========================
 function smaAt(closes: number[], idx: number, period: number) {
   const start = idx - period + 1;
@@ -297,12 +336,12 @@ function rsiAt(closes: number[], idx: number, period: number) {
 
 function volumeSpikeAt(vols: number[] | undefined, idx: number) {
   if (!vols?.length) return null;
-  if (idx < 5 || idx >= vols.length) return null;
-  const recent = vols.slice(idx - 5, idx);
+  if (idx < 6 || idx >= vols.length) return null;
+  const recent = vols.slice(idx - 6, idx);
   const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
-  const eventV = vols[idx];
-  if (!avg || !Number.isFinite(avg) || !Number.isFinite(eventV)) return null;
-  return eventV > avg * 2.5;
+  const v = vols[idx];
+  if (!avg || !Number.isFinite(avg) || !Number.isFinite(v)) return null;
+  return v > avg * 2.2; // biraz daha hassas
 }
 
 function breakout20At(closes: number[], idx: number) {
@@ -323,90 +362,70 @@ function technicalContextAt(closes: number[], idx: number) {
   if (ma50 !== null && ma200 !== null) {
     if (price > ma50 && ma50 > ma200) trend = "📈 Uptrend";
     else if (price < ma50 && ma50 < ma200) trend = "📉 Downtrend";
-    else trend = "🟨 Range";
   } else if (ma50 !== null) {
     trend = price >= ma50 ? "📈 Uptrend" : "📉 Downtrend";
   }
 
-  let momentumTag: string | null = null;
-  if (idx - 10 >= 0) {
-    const r10 = (price - closes[idx - 10]) / closes[idx - 10];
-    if (Math.abs(r10) >= 0.06) momentumTag = "🔥 Momentum";
-  }
-
   const sup = minAt(closes, idx, 20);
   const res = maxAt(closes, idx, 20);
-  let levelTag: string | null = null;
 
-  if (sup !== null) {
-    const dist = (price - sup) / price;
-    if (dist <= 0.02) levelTag = "🧲 Near support";
-  }
-  if (!levelTag && res !== null) {
-    const dist = (res - price) / price;
-    if (dist <= 0.02) levelTag = "🧲 Near resistance";
+  const tags: string[] = [trend];
+
+  if (sup !== null && (price - sup) / price <= 0.02) tags.push("🧲 Near support");
+  else if (res !== null && (res - price) / price <= 0.02) tags.push("🧲 Near resistance");
+
+  if (idx - 10 >= 0) {
+    const r10 = (price - closes[idx - 10]) / closes[idx - 10];
+    if (Math.abs(r10) >= 0.06) tags.push("🔥 Momentum");
   }
 
-  const parts = [trend, momentumTag, levelTag].filter(Boolean) as string[];
-  return parts.join(" · ");
+  return tags.join(" · ");
 }
 
-function buildTechnicalContext(opts: {
-  retPre5: number | null;
-  baseTech: string | null;
-  category?: string | null;
-  headline?: string | null;
+function buildSignals(it: {
+  expectedDir: Dir;
+  realizedDir: Dir;
+  tooEarly: boolean;
+  confidence: number;
   rsi14: number | null;
   breakout20: boolean | null;
   volumeSpike: boolean | null;
   bullTrap: boolean | null;
+  pricedIn: boolean | null;
+  ret1d: number | null;
+  ret5d: number | null;
+  technicalContext: string | null;
 }) {
-  const { retPre5, baseTech, category, headline, rsi14, breakout20, volumeSpike, bullTrap } = opts;
-  const parts: string[] = [];
+  const sig: string[] = [];
 
-  if (baseTech) parts.push(baseTech);
+  // Direction
+  sig.push(it.expectedDir === 1 ? "E▲ Bull" : it.expectedDir === -1 ? "E▼ Bear" : "E■ Flat");
+  sig.push(it.realizedDir === 1 ? "R▲ Bull" : it.realizedDir === -1 ? "R▼ Bear" : "R■ Flat");
 
-  if (typeof rsi14 === "number") {
-    if (rsi14 >= 70) parts.push(`🟥 RSI ${rsi14.toFixed(0)} (overbought)`);
-    else if (rsi14 <= 30) parts.push(`🟩 RSI ${rsi14.toFixed(0)} (oversold)`);
-    else parts.push(`🟦 RSI ${rsi14.toFixed(0)}`);
+  if (it.tooEarly) sig.push("⚠️ Too early");
+  sig.push(`Conf ${Math.round(it.confidence)}%`);
+
+  if (typeof it.rsi14 === "number") {
+    if (it.rsi14 >= 70) sig.push(`RSI ${it.rsi14.toFixed(0)} OB`);
+    else if (it.rsi14 <= 30) sig.push(`RSI ${it.rsi14.toFixed(0)} OS`);
+    else sig.push(`RSI ${it.rsi14.toFixed(0)}`);
   }
+  if (it.breakout20 === true) sig.push("🚪 20D breakout");
+  if (it.volumeSpike === true) sig.push("📊 Vol spike");
+  if (it.bullTrap === true) sig.push("🪤 Bull trap");
 
-  if (breakout20 === true) parts.push("🚪 20D breakout");
-  if (volumeSpike === true) parts.push("📊 High volume");
-  if (bullTrap === true) parts.push("🪤 Bull trap risk");
+  if (it.pricedIn === true) sig.push("🧾 Priced-in");
+  if (it.technicalContext) sig.push(it.technicalContext);
 
-  if (typeof retPre5 === "number") {
-    if (retPre5 > 0.12) parts.push("🚀 Strong pre-news run-up");
-    else if (retPre5 > 0.06) parts.push("📈 Moderate pre-news rally");
-    else if (retPre5 < -0.10) parts.push("🧨 Sharp pre-news sell-off");
-    else if (retPre5 < -0.05) parts.push("📉 Pre-news weakness");
-    else if (Math.abs(retPre5) < 0.02) parts.push("🟨 Sideways consolidation");
-  }
-
-  const cat = (category || "").toLowerCase();
-  const hl = (headline || "").toLowerCase();
-
-  if (cat.includes("earn") || hl.includes("earnings") || hl.includes("eps")) {
-    parts.push("🧾 Earnings catalyst");
-  } else if (cat.includes("upgrade") || hl.includes("upgrade")) {
-    parts.push("📣 Analyst upgrade");
-  } else if (cat.includes("downgrade") || hl.includes("downgrade")) {
-    parts.push("⚠️ Analyst downgrade");
-  } else if (cat.includes("launch") || hl.includes("launch") || hl.includes("unveil")) {
-    parts.push("🧪 Product launch");
-  }
-
-  if (!parts.length) return "General news event";
-  return parts.join(" + ");
+  return sig.filter(Boolean);
 }
 
 // =========================
-// GEMINI (cached)
+// GEMINI (cached) — only relevant items
 // =========================
 function aiCacheKey(it: { symbol: string; publishedAt: string; headline: string }) {
   const h = (it.headline || "").trim().toLowerCase().slice(0, 180);
-  return `ai:v1:${it.symbol}:${it.publishedAt}:${h}`;
+  return `ai:v2:${it.symbol}:${it.publishedAt}:${h}`;
 }
 
 async function geminiComment(params: {
@@ -418,26 +437,30 @@ async function geminiComment(params: {
   ret5d: number | null;
   score: number;
   pricedIn: boolean | null;
+  confidence: number;
 }) {
   if (!GEMINI_API_KEY) return null;
 
   const prompt = `
 Sen bir finans haber-reaksiyon analisti asistanısın. Yatırım tavsiyesi verme.
-Aşağıdaki tek başlığa göre, KISA ve NET şekilde Türkçe yorum üret:
+Bu başlığın HİSSEYLE alakalı olup olmadığını kontrol et ve alaka yoksa "irrelevant" yaz.
 
 Hisse: ${params.symbol}
 Başlık: ${params.headline}
+
 Teknik Context: ${params.technicalContext ?? "—"}
 Pre-5d: ${params.retPre5 ?? "—"}
 +1D: ${params.ret1d ?? "—"}
 +5D: ${params.ret5d ?? "—"}
 Score: ${params.score}
+Confidence: ${params.confidence}%
 Priced-in: ${params.pricedIn === true ? "yes" : params.pricedIn === false ? "no" : "unknown"}
 
-Çıktı FORMAT:
+FORMAT:
+- relevance: relevant | irrelevant
 - summary: Tek cümle (maks 18 kelime)
 - sentiment: bullish | bearish | mixed | neutral
-- bullets: 3 madde (her madde 10-14 kelime, emoji serbest)
+- bullets: 3 madde (10-14 kelime)
 `;
 
   const url =
@@ -446,10 +469,7 @@ Priced-in: ${params.pricedIn === true ? "yes" : params.pricedIn === false ? "no"
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.4,
-      maxOutputTokens: 220,
-    },
+    generationConfig: { temperature: 0.35, maxOutputTokens: 240 },
   };
 
   const res = await fetch(url, {
@@ -464,21 +484,25 @@ Priced-in: ${params.pricedIn === true ? "yes" : params.pricedIn === false ? "no"
   const text =
     json?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n") || "";
 
-  // very light parse
+  const relMatch = text.match(/relevance:\s*(relevant|irrelevant)/i);
   const summaryMatch = text.match(/summary:\s*(.+)/i);
   const sentimentMatch = text.match(/sentiment:\s*(bullish|bearish|mixed|neutral)/i);
-  const bulletsMatch = text
+
+  const bullets = text
     .split("\n")
     .filter((l: string) => l.trim().startsWith("-") || l.trim().startsWith("•"))
     .map((l: string) => l.replace(/^[-•]\s*/, "").trim())
     .filter(Boolean);
 
-  const summary = summaryMatch?.[1]?.trim() || null;
-  const aiSentiment = (sentimentMatch?.[1]?.toLowerCase() as any) || null;
-  const aiBullets = bulletsMatch.length ? bulletsMatch.slice(0, 5) : null;
+  const relevance = (relMatch?.[1]?.toLowerCase() as any) || "relevant";
+  if (relevance === "irrelevant") return { irrelevant: true };
 
-  if (!summary && !aiBullets) return null;
-  return { aiSummary: summary, aiSentiment, aiBullets };
+  const aiSummary = summaryMatch?.[1]?.trim() || null;
+  const aiSentiment = (sentimentMatch?.[1]?.toLowerCase() as any) || null;
+  const aiBullets = bullets.length ? bullets.slice(0, 5) : null;
+
+  if (!aiSummary && !aiBullets) return null;
+  return { aiSummary, aiSentiment, aiBullets };
 }
 
 // =========================
@@ -492,33 +516,28 @@ async function getCandlesCached(symbol: string, fromUnix: number, toUnix: number
     if (cached?.t?.length && cached?.c?.length) return cached;
   } catch {}
 
-  try {
-    const url =
-      `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}` +
-      `&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
+  const url =
+    `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}` +
+    `&resolution=D&from=${fromUnix}&to=${toUnix}&token=${FINNHUB_API_KEY}`;
 
-    const res = await fetchWithRetry(url);
-    if (!res.ok) return null;
+  const res = await fetchWithRetry(url);
+  if (!res.ok) return null;
 
-    const data = await res.json();
-    if (data?.s !== "ok") return null;
+  const data = await res.json();
+  if (data?.s !== "ok") return null;
 
-    const payload: CandleData = {
-      t: data.t as number[],
-      c: data.c as number[],
-      v: Array.isArray(data.v) ? (data.v as number[]) : undefined,
-    };
+  const payload: CandleData = {
+    t: data.t as number[],
+    c: data.c as number[],
+    v: Array.isArray(data.v) ? (data.v as number[]) : undefined,
+  };
 
-    try { await kv.set(key, payload, { ex: CANDLE_CACHE_TTL_SEC }); } catch {}
-
-    return payload;
-  } catch {
-    return null;
-  }
+  try { await kv.set(key, payload, { ex: CANDLE_CACHE_TTL_SEC }); } catch {}
+  return payload;
 }
 
 // =========================
-// PER-SYMBOL fetch
+// PER-SYMBOL fetch (relevance + technicals)
 // =========================
 async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   const now = new Date();
@@ -549,6 +568,9 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
   for (const n of news) {
     if (!n?.headline || !n?.datetime) continue;
 
+    // ✅ relevance filter (asıl fix)
+    if (!isRelevant(symbol, String(n.headline))) continue;
+
     const ageDays = (Date.now() - Number(n.datetime) * 1000) / (1000 * 60 * 60 * 24);
     if (ageDays > MAX_NEWS_AGE_DAYS) continue;
 
@@ -566,12 +588,15 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     let volumeSpike: boolean | null = null;
 
     if (candles?.t?.length && candles?.c?.length) {
+      // ✅ robust candle index: last candle <= newsTime
       const idx = findLastLE(candles.t, Number(n.datetime));
       if (idx !== -1) {
         const base = candles.c[idx];
 
+        // forward returns
         if (idx + 1 < candles.c.length) ret1d = (candles.c[idx + 1] - base) / base;
         if (idx + 5 < candles.c.length) ret5d = (candles.c[idx + 5] - base) / base;
+        // pre returns
         if (idx - 5 >= 0) retPre5 = (base - candles.c[idx - 5]) / candles.c[idx - 5];
 
         baseTech = technicalContextAt(candles.c, idx);
@@ -594,16 +619,29 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
     const expectedDir = expectedDirectionFromHeadline(String(n.headline));
     const realizedDir = realizedDirection(ret1d, ret5d);
 
-    const technicalContext = buildTechnicalContext({
-      retPre5,
-      baseTech,
-      category: n.category ?? null,
-      headline: String(n.headline),
+    const technicalContext = [
+      baseTech || null,
+      typeof rsi14 === "number" ? `RSI ${rsi14.toFixed(0)}` : null,
+      breakout20 ? "20D breakout" : null,
+      volumeSpike ? "Vol spike" : null,
+      bullTrap ? "Bull trap risk" : null,
+    ].filter(Boolean).join(" · ") || (baseTech ?? "General");
+
+    const signals = buildSignals({
+      expectedDir,
+      realizedDir,
+      tooEarly,
+      confidence,
       rsi14,
       breakout20,
       volumeSpike,
       bullTrap,
+      pricedIn: exp.pricedIn,
+      ret1d,
+      ret5d,
+      technicalContext,
     });
+    const signalsText = signals.join(" · ");
 
     items.push({
       symbol,
@@ -632,6 +670,9 @@ async function fetchSymbolItems(symbol: string): Promise<LeaderItem[]> {
 
       technicalContext,
 
+      signals,
+      signalsText,
+
       aiSummary: null,
       aiBullets: null,
       aiSentiment: null,
@@ -650,7 +691,6 @@ export async function GET(req: Request) {
   if (!FINNHUB_API_KEY) {
     return NextResponse.json({ error: "No FINNHUB_API_KEY" }, { status: 500 });
   }
-
   if (!assertCronAuth(req)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -664,13 +704,15 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, reset: true }, { status: 200 });
     }
 
-    const universe = ((await kv.get("symbols:universe")) as string[] | null) ?? DEFAULT_UNIVERSE;
+    const universe =
+      ((await kv.get("symbols:universe")) as string[] | null) ?? DEFAULT_UNIVERSE;
     const cursor = ((await kv.get("symbols:cursor")) as number | null) ?? 0;
 
     const { batch, nextCursor } = pickBatch(universe, cursor);
 
     const newItems: LeaderItem[] = [];
 
+    // sequential fetch + sleep
     for (const sym of batch) {
       try {
         const arr = await fetchSymbolItems(sym);
@@ -679,9 +721,10 @@ export async function GET(req: Request) {
         if (String(e?.message || "").includes("429")) throw e;
         console.error("symbol fetch error", sym, e);
       }
+      await sleep(BETWEEN_SYMBOL_SLEEP_MS);
     }
 
-    // ✅ Gemini: en fazla 5 item, score yüksek olanlardan
+    // Gemini: only on relevant + high score
     let aiUsed = 0;
     if (GEMINI_API_KEY) {
       const candidates = [...newItems]
@@ -692,9 +735,11 @@ export async function GET(req: Request) {
         if (aiUsed >= GEMINI_MAX_PER_RUN) break;
 
         const k = aiCacheKey(it);
+
         try {
           const cached = (await kv.get(k)) as any;
-          if (cached?.aiSummary || cached?.aiBullets) {
+          if (cached?.aiSummary || cached?.aiBullets || cached?.irrelevant) {
+            if (cached?.irrelevant) continue;
             it.aiSummary = cached.aiSummary ?? null;
             it.aiBullets = cached.aiBullets ?? null;
             it.aiSentiment = cached.aiSentiment ?? null;
@@ -712,24 +757,28 @@ export async function GET(req: Request) {
             ret5d: it.ret5d,
             score: it.score,
             pricedIn: it.pricedIn,
+            confidence: it.confidence,
           });
+
+          if (out?.irrelevant) {
+            try { await kv.set(k, { irrelevant: true }, { ex: GEMINI_CACHE_TTL_SEC }); } catch {}
+            continue;
+          }
 
           if (out) {
             it.aiSummary = out.aiSummary ?? null;
             it.aiBullets = out.aiBullets ?? null;
             it.aiSentiment = out.aiSentiment ?? null;
-
-            try {
-              await kv.set(k, out, { ex: GEMINI_CACHE_TTL_SEC });
-            } catch {}
+            try { await kv.set(k, out, { ex: GEMINI_CACHE_TTL_SEC }); } catch {}
             aiUsed++;
           }
-        } catch (e) {
-          // sessiz geç: Gemini error olursa cron bozulmasın
+        } catch {
+          // gemini fail -> ignore
         }
       }
     }
 
+    // merge pool
     const poolRaw = (await kv.get("pool:v1")) as { asOf: string; items: LeaderItem[] } | null;
     const oldItems = poolRaw?.items || [];
 
@@ -750,12 +799,23 @@ export async function GET(req: Request) {
     await kv.set("symbols:cursor", nextCursor);
 
     return NextResponse.json(
-      { ok: true, scanned: batch, added: newItems.length, aiUsed, cursor, nextCursor, poolSize: merged.length },
+      {
+        ok: true,
+        scanned: batch,
+        added: newItems.length,
+        aiUsed,
+        cursor,
+        nextCursor,
+        poolSize: merged.length,
+      },
       { status: 200 }
     );
   } catch (e: any) {
     if (String(e?.message || "").includes("429")) {
-      return NextResponse.json({ error: "Rate limit exceeded – please try again later" }, { status: 429 });
+      return NextResponse.json(
+        { error: "Rate limit exceeded – please try again later" },
+        { status: 429 }
+      );
     }
     return NextResponse.json({ error: e?.message || "Unknown error" }, { status: 500 });
   }

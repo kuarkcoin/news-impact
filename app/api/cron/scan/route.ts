@@ -7,6 +7,21 @@ export const maxDuration = 60;
 
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const SYMBOL_ALIASES: Record<string, string[]> = {
+  AAPL: ["apple", "iphone", "ipad", "mac", "ios"],
+  MSFT: ["microsoft", "windows", "azure", "copilot"],
+  NVDA: ["nvidia", "gpu", "cuda", "h100"],
+  TSLA: ["tesla", "elon", "fsd", "model"],
+  AMD: ["amd", "ryzen", "epyc"],
+  META: ["meta", "facebook", "instagram"],
+  GOOGL: ["google", "alphabet", "youtube"],
+};
+function isRelevant(symbol: string, headline: string) {
+  const t = headline.toLowerCase();
+  const aliases = SYMBOL_ALIASES[symbol] || [symbol.toLowerCase()];
+  return aliases.some(a => t.includes(a));
+}
+
 
 // =========================
 // CRON AUTH (VERCEL + OPTIONAL MANUAL)

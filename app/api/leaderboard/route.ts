@@ -27,7 +27,7 @@ type LeaderItem = {
 
   technicalContext?: string | null;
 
-  // ✅ scan tarafıyla uyum (teknik ekstra alanlar)
+  // scan tarafıyla uyum
   expectedDir?: Dir;
   realizedDir?: Dir;
   rsi14?: number | null;
@@ -35,10 +35,13 @@ type LeaderItem = {
   bullTrap?: boolean | null;
   volumeSpike?: boolean | null;
 
-  // ✅ Gemini yorumları (UI’de “AL yorumları”)
+  // Gemini
   aiSummary?: string | null;
   aiBullets?: string[] | null;
   aiSentiment?: "bullish" | "bearish" | "mixed" | "neutral" | null;
+
+  // ✅ UI için: Signals kolonunu doldurmak üzere
+  signals?: string[] | null;
 };
 
 function clamp(n: number, a: number, b: number) {
@@ -48,6 +51,46 @@ function clamp(n: number, a: number, b: number) {
 function safeInt(v: string | null, fallback: number) {
   const n = parseInt(v ?? "", 10);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function dirToText(prefix: string, d?: Dir) {
+  if (d === 1) return `${prefix}: Bull`;
+  if (d === -1) return `${prefix}: Bear`;
+  if (d === 0) return `${prefix}: Flat`;
+  return null;
+}
+
+// ✅ Cron item’larından UI “signals” üret
+function buildSignals(it: LeaderItem): string[] {
+  const out: string[] = [];
+
+  // Direction tags
+  const e = dirToText("E", it.expectedDir);
+  const r = dirToText("R", it.realizedDir);
+  if (e) out.push(e);
+  if (r) out.push(r);
+
+  // RSI
+  if (typeof it.rsi14 === "number") {
+    const v = Math.round(it.rsi14);
+    if (v >= 70) out.push(`RSI ${v} (Overbought)`);
+    else if (v <= 30) out.push(`RSI ${v} (Oversold)`);
+    else out.push(`RSI ${v}`);
+  }
+
+  // Breakout / Volume / Trap
+  if (it.breakout20 === true) out.push("20D Breakout");
+  if (it.volumeSpike === true) out.push("Volume Spike");
+  if (it.bullTrap === true) out.push("Bull Trap Risk");
+
+  // Priced-in / Too early
+  if (it.tooEarly) out.push("⚠️ Too early to price");
+  if (it.pricedIn === true) out.push("Priced-in risk");
+
+  // Eğer hiç sinyal yoksa boş bırakma
+  if (!out.length) out.push("—");
+
+  return out;
 }
 
 export async function GET(req: Request) {
@@ -72,9 +115,10 @@ export async function GET(req: Request) {
 
     let items = data.items;
 
-    // ✅ q filtresi: headline/type/symbol + technicalContext + aiSummary + aiBullets
+    // ✅ q filtresi: headline/type/symbol + technicalContext + aiSummary + aiBullets + aiSentiment + signals
     if (q) {
       items = items.filter((it) => {
+        const sig = Array.isArray(it.signals) ? it.signals.join(" ") : "";
         const blob = [
           it.symbol,
           it.headline,
@@ -83,6 +127,7 @@ export async function GET(req: Request) {
           it.aiSummary || "",
           Array.isArray(it.aiBullets) ? it.aiBullets.join(" ") : "",
           it.aiSentiment || "",
+          sig,
         ]
           .join(" ")
           .toLowerCase();
@@ -103,6 +148,12 @@ export async function GET(req: Request) {
 
     // ✅ limit
     items = items.slice(0, limit);
+
+    // ✅ signals üret (UI “Signals” kolonunu doldurur)
+    items = items.map((it) => ({
+      ...it,
+      signals: Array.isArray(it.signals) && it.signals.length ? it.signals : buildSignals(it),
+    }));
 
     return NextResponse.json(
       { asOf: data.asOf ?? new Date().toISOString(), items },

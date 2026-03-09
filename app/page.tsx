@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-
+ 
 type LeaderboardItem = {
   symbol: string;
   headline: string;

@@ -9,7 +9,7 @@ type LeaderboardItem = {
   type?: string | null;
   publishedAt: string; // ISO
   score: number; // 0..100 or 50..100
-
+ 
   pricedIn?: boolean | null;
   retPre5?: number | null;
   ret1d?: number | null;
